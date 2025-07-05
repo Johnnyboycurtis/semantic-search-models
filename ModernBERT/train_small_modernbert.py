@@ -79,8 +79,9 @@ model = SentenceTransformer(
     model_card_data=SentenceTransformerModelCardData(
         language="en",
         license="apache-2.0",
-        model_name="Small ModernBERT for Sentence Similarity",
-    )
+        model_name="ModernBERT-small for Sentence Similarity",
+    ),
+    model_kwargs={"torch_dtype": torch.bfloat16}
 )
 print("SUCCESS: Blank ModernBERT model loaded into a SentenceTransformer wrapper.")
 print(model)
@@ -100,11 +101,13 @@ dataset_name = "sentence-transformers/all-nli"
 print(f"\nINFO: Loading dataset '{dataset_name}' for training...")
 
 # This is the dataset our model will learn from.
-train_dataset = load_dataset(dataset_name, "triplet", split="train[:50000]")
+# train_dataset = load_dataset(dataset_name, "triplet", split="train[:50000]") # for testing
+train_dataset = load_dataset(dataset_name, "triplet", split="train")
 
 # We'll also load a separate 'development' or 'validation' set. The model never
 # trains on this data; we only use it to check how well the model is learning.
-eval_dataset_nli = load_dataset(dataset_name, "triplet", split="dev[:1000]")
+# eval_dataset_nli = load_dataset(dataset_name, "triplet", split="dev[:1000]") # for testing
+eval_dataset_nli = load_dataset(dataset_name, "triplet", split="dev")
 
 # To get a more robust measure of performance, I'm also loading the famous
 # STS benchmark (STSb). It contains pairs of sentences with a human-rated
