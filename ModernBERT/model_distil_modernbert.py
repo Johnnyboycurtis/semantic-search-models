@@ -47,12 +47,13 @@ logging.info(f"Start time: {start}")
 
 # --- Step 1: Define Teacher and Student Models ---
 # The "teacher" model is a powerful, pre-trained model. `bge-base` is a top-tier choice.
-teacher_model_name = "sentence-transformers/all-MiniLM-L6-v2"
+teacher_model_name = "BAAI/bge-base-en-v1.5"
+# teacher_model_name = "Alibaba-NLP/gte-modernbert-base" # too large!!
 # The "student" model is our own small ModernBERT.
 student_model_path = './output/training-small-modernbert/final-best'
 
 # Define where we will save the final, distilled model.
-output_dir = "output/distilled-modernbert-advanced" # + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+output_dir = "output/distilled-modernbert-small" # + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 # Training hyperparameters
 train_batch_size = 64
@@ -61,8 +62,10 @@ inference_batch_size = 64 # For the teacher model's encoding step
 logging.info(f"Teacher model: {teacher_model_name}")
 logging.info(f"Student model (initial): {student_model_path}")
 
-teacher_model = SentenceTransformer(teacher_model_name)
-student_model = SentenceTransformer(student_model_path)
+teacher_model = SentenceTransformer(teacher_model_name, model_kwargs={"torch_dtype": torch.bfloat16})
+print(teacher_model)
+student_model = SentenceTransformer(student_model_path,  model_kwargs={"torch_dtype": torch.bfloat16})
+print(student_model)
 
 
 # --- Step 2: Load and Prepare Datasets ---
@@ -112,7 +115,7 @@ if student_embedding_dim < teacher_embedding_dim:
         bias=False,
         activation_function=torch.nn.Identity(),
     )
-    dense_layer.linear.weight = torch.nn.Parameter(torch.tensor(pca.components_))
+    dense_layer.linear.weight = torch.nn.Parameter(torch.tensor(pca.components_, dtype=torch.bfloat16))
     teacher_model.add_module("dense_pca", dense_layer)
     logging.info(f"Teacher model updated. Output dimension is now: {teacher_model.get_sentence_embedding_dimension()}")
 
@@ -134,7 +137,6 @@ train_dataset = train_dataset.map(map_embeddings, batched=True, batch_size=2048)
 stsb_eval_dataset = load_dataset("sentence-transformers/stsb", split="validation")
 
 # Evaluator 1: Standard STSb evaluation to check real-world performance.
-# [FIX] Initialize the evaluator by passing the columns directly.
 dev_evaluator_stsb = EmbeddingSimilarityEvaluator(
     sentences1=stsb_eval_dataset["sentence1"],
     sentences2=stsb_eval_dataset["sentence2"],
@@ -144,7 +146,7 @@ dev_evaluator_stsb = EmbeddingSimilarityEvaluator(
 
 # Evaluator 2: MSE evaluator to check how well the student mimics the teacher.
 # For this, we need a small sample of sentences.
-eval_sentences = stsb_eval_dataset['sentence1'][:1000] + stsb_eval_dataset['sentence2'][:1000]
+eval_sentences = stsb_eval_dataset['sentence1'][:2000] + stsb_eval_dataset['sentence2'][:2000]
 dev_evaluator_mse = evaluation.MSEEvaluator(eval_sentences, eval_sentences, teacher_model=teacher_model, name="mse-dev")
 
 # Combine them to run both during evaluation steps.
@@ -157,11 +159,13 @@ train_loss = losses.MSELoss(model=student_model)
 # --- Step 6: Configure and Run the Trainer ---
 args = SentenceTransformerTrainingArguments(
     output_dir=output_dir,
-    num_train_epochs=1,
+    num_train_epochs=2,
     per_device_train_batch_size=train_batch_size,
     per_device_eval_batch_size=train_batch_size,
     warmup_ratio=0.1,
-    fp16=True,  # Set to False if your GPU has issues with FP16
+    fp16=False,
+    bf16=True,
+    bf16_full_eval=True,
     learning_rate=1e-4, # Distillation often benefits from a slightly higher learning rate
     eval_strategy="steps",
     eval_steps=1000,
@@ -171,7 +175,7 @@ args = SentenceTransformerTrainingArguments(
     logging_steps=100,
     metric_for_best_model="sts-dev_spearman_cosine", # We care most about the real-world performance
     load_best_model_at_end=True,
-    run_name="distill-modernbert",
+    run_name="distilled-modernbert-small",
 )
 
 trainer = SentenceTransformerTrainer(
