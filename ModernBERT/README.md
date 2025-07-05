@@ -1,5 +1,11 @@
 # ModernBERT-Small
 
+## Training Steps
+
+1. Run `python build_and_save_small_modernbert.py`
+
+2. Run `train_small_modernbert.py`
+
 ### Training Output
 
 ```python
