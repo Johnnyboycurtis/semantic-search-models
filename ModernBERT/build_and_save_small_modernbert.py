@@ -8,11 +8,11 @@ from transformers import ModernBertConfig, ModernBertModel, AutoTokenizer
 # We are reducing the key parameters that determine the model's size.
 print("Defining the small ModernBERT configuration...")
 small_modernbert_config = ModernBertConfig(
-    hidden_size=256,                 # A common dimension for small embedding models
-    num_hidden_layers=6,               # Significantly fewer layers than the base's 22
-    num_attention_heads=4,             # Must be a divisor of hidden_size
-    intermediate_size=1024,            # Typically 4 * hidden_size
-    max_position_embeddings=512,       # Max sequence length for the model
+    hidden_size=384,                 # A common dimension for small embedding models
+    num_hidden_layers=12,               # Significantly fewer layers than the base's 22
+    num_attention_heads=6,             # Must be a divisor of hidden_size
+    intermediate_size=1536,            # Typically 4 * hidden_size
+    max_position_embeddings=1024,       # Max sequence length for the model; originally 8192
 )
 
 # --- 2. Create the Blank Model ---
