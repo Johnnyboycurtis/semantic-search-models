@@ -22,7 +22,15 @@
 #
 # ==============================================================================
 
-import os
+import torch
+
+if torch.cuda.is_available():
+    print("GPU (CUDA) is available for PyTorch.")
+    print(f"Number of available GPUs: {torch.cuda.device_count()}")
+    print(f"Current GPU device name: {torch.cuda.get_device_name(0)}") # Get name of first GPU
+else:
+    print("GPU (CUDA) is not available for PyTorch. PyTorch will run on CPU.")
+    
 from sentence_transformers import (
     models,
     SentenceTransformer,
