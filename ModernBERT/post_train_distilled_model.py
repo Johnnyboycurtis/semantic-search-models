@@ -41,7 +41,7 @@ logging.basicConfig(
 # --- Step 1: Initialize Our Model ---
 # This script assumes you have already run the `build_and_save...` script
 # to create a blank model architecture.
-model_path = "ModernBERT-small/distilled-kldiv-ModernBERT-small/checkpoint-8717"
+model_path = "ModernBERT-small/distilled-kldiv-ModernBERT-small/checkpoint-2266"
 logging.info(f"Loading custom blank model architecture from: {model_path}")
 
 word_embedding_model = models.Transformer(model_path)
@@ -67,25 +67,30 @@ logging.info("SUCCESS: Blank ModernBERT model loaded into a SentenceTransformer 
 
 # --- Dataset 1: AllNLI ---
 logging.info("Loading dataset 'sentence-transformers/all-nli'...")
-nli_train_dataset = load_dataset("sentence-transformers/all-nli", "triplet", split="train")
+nli_train_dataset = load_dataset("sentence-transformers/all-nli", "triplet", split="train").shuffle(123).select(range(10000))
 eval_dataset_nli = load_dataset("sentence-transformers/all-nli", "triplet", split="dev")
 
 
 # --- Dataset 2: TriviaQA ---
 logging.info("Loading dataset 'sentence-transformers/msmarco-msmarco-distilbert-base-v3'...")
-trivia_qa_dataset = load_dataset("sentence-transformers/trivia-qa-triplet", "triplet", split="train")
+trivia_qa_dataset = load_dataset("sentence-transformers/trivia-qa-triplet", "triplet", split="train").shuffle(123).select(range(10000))
 # This dataset uses 'query' as the anchor, so we rename it to match 'all-nli'
 
 # --- Dataset 2: MS MARCO ---
 logging.info("Loading dataset 'sentence-transformers/msmarco-msmarco-distilbert-base-v3'...")
-msmarco_dataset = load_dataset("sentence-transformers/msmarco-msmarco-distilbert-base-v3", "triplet", split="train")
+msmarco_dataset = load_dataset("sentence-transformers/msmarco-msmarco-distilbert-base-v3", "triplet", split="train").shuffle(123).select(range(100000))
 # This dataset uses 'query' as the anchor, so we rename it to match 'all-nli'
 msmarco_dataset = msmarco_dataset.rename_column("query", "anchor")
+msmarco_splits = msmarco_dataset.train_test_split(test_size=5000, seed=42)
+msmarco_train_dataset = msmarco_splits["train"]
+eval_dataset_msmarco = msmarco_splits["test"]
+del msmarco_dataset
+
 
 # --- Concatenate Datasets ---
 logging.info("Concatenating datasets...")
 # Combine the training sets into one large dataset.
-train_dataset = concatenate_datasets([nli_train_dataset, trivia_qa_dataset, msmarco_dataset])
+train_dataset = concatenate_datasets([nli_train_dataset, trivia_qa_dataset, msmarco_train_dataset])
 # It's good practice to shuffle the combined dataset.
 train_dataset = train_dataset.shuffle(seed=25)
 logging.info(f"SUCCESS: Combined training dataset created with {len(train_dataset):,} examples.")
@@ -104,7 +109,7 @@ loss = MultipleNegativesRankingLoss(model)
 
 
 # --- Step 4: Configure Training Arguments ---
-output_dir = "./ModernBERT-small/training-modernbert-multi-dataset-" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+output_dir = "./ModernBERT-small/distilled-kldiv-ModernBERT-small/post_training"
 logging.info(f"Training arguments configured. Checkpoints will be saved to: {output_dir}")
 
 args = SentenceTransformerTrainingArguments(
@@ -121,7 +126,7 @@ args = SentenceTransformerTrainingArguments(
     save_steps=5000,
     save_total_limit=4,
     load_best_model_at_end=True,
-    metric_for_best_model="eval_all-nli-dev_cosine_accuracy",
+    metric_for_best_model= "sts-dev_spearman_cosine", #"eval_all-nli-dev_cosine_accuracy",
     logging_steps=100,
     run_name="modernbert-multi-dataset",
 )
@@ -147,7 +152,16 @@ stsb_evaluator = EmbeddingSimilarityEvaluator(
     name="sts-dev",
 )
 
-evaluator = SequentialEvaluator([nli_evaluator, stsb_evaluator])
+
+# We also use a TripletEvaluator on the NLI dev set.
+dev_evaluator_msmarco = TripletEvaluator(
+    anchors=eval_dataset_msmarco["anchor"],
+    positives=eval_dataset_msmarco["positive"],
+    negatives=eval_dataset_msmarco["negative"],
+    name="msmarco-dev", # A label for the output logs
+)
+
+evaluator = SequentialEvaluator([nli_evaluator, stsb_evaluator, dev_evaluator_msmarco])
 
 
 # --- Step 6: Initialize and Start the Trainer ---
