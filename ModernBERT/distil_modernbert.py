@@ -47,13 +47,14 @@ logging.info(f"Start time: {start}")
 
 # --- Step 1: Define Teacher and Student Models ---
 # The "teacher" model is a powerful, pre-trained model. `bge-base` is a top-tier choice.
-teacher_model_name = "BAAI/bge-base-en-v1.5"
+teacher_model_name = "sentence-transformers/all-MiniLM-L6-v2"
+# teacher_model_name = "BAAI/bge-base-en-v1.5"
 # teacher_model_name = "Alibaba-NLP/gte-modernbert-base" # too large!!
 # The "student" model is our own small ModernBERT.
-student_model_path = './output/training-small-modernbert/final-best'
+student_model_path = './ModernBERT-small/training-small-modernbert/final'
 
 # Define where we will save the final, distilled model.
-output_dir = "output/distilled-modernbert-small" # + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+output_dir = "ModernBERT-small/distilled-modernbert-small" # + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 # Training hyperparameters
 train_batch_size = 64
@@ -86,8 +87,8 @@ wiki_dataset = load_dataset("sentence-transformers/wikipedia-en-sentences", spli
 
 # For demonstration, we'll use a smaller subset. For best results, use the full datasets.
 train_dataset = concatenate_datasets([
-    nli_dataset.select(range(100000)),
-    wiki_dataset.select(range(100000))
+    nli_dataset.select(range(400000)),
+    wiki_dataset.select(range(400000))
 ])
 logging.info(f"Combined training dataset size: {len(train_dataset):,}")
 
@@ -97,12 +98,13 @@ logging.info(f"Combined training dataset size: {len(train_dataset):,}")
 # project the teacher's embeddings down to the student's size.
 student_embedding_dim = student_model.get_sentence_embedding_dimension()
 teacher_embedding_dim = teacher_model.get_sentence_embedding_dimension()
+print("Embedding Dimensions: ", student_embedding_dim, teacher_embedding_dim)
 
 if student_embedding_dim < teacher_embedding_dim:
     logging.info("Student dimension < Teacher dimension. Applying PCA projection.")
 
     # We train PCA on a sample of the teacher's embeddings
-    pca_train_sentences = list(nli_dataset.select(range(20000))['sentence'])
+    pca_train_sentences = list(nli_dataset.select(range(30000))['sentence'])
     pca_embeddings = teacher_model.encode(pca_train_sentences, convert_to_numpy=True)
 
     pca = PCA(n_components=student_embedding_dim)

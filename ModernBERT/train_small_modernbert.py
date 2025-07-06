@@ -46,7 +46,7 @@ from sentence_transformers.evaluation import (
     SequentialEvaluator, # To combine multiple evaluators
     SimilarityFunction,
 )
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 
 # --- Step 1: Initialize Our Model ---
 # Here, we're not starting with a pre-trained model from the internet. Instead,
@@ -54,7 +54,7 @@ from datasets import load_dataset
 # in the previous step. This gives us full control over the model's size.
 
 # I've set the path to where we saved our blank model. Make sure this is correct.
-model_path = "./ModernBERT-small"
+model_path = "./ModernBERT-small/blank_model"
 print(f"INFO: Loading our custom blank model architecture from: {model_path}")
 
 # A SentenceTransformer model is built from modules, like Lego bricks.
@@ -97,17 +97,29 @@ print(model)
 #  - 'positive': A sentence that is semantically similar to the anchor.
 #  - 'negative': A sentence that is unrelated to the anchor.
 # This format is perfect for "contrastive learning".
-dataset_name = "sentence-transformers/all-nli"
-print(f"\nINFO: Loading dataset '{dataset_name}' for training...")
 
-# This is the dataset our model will learn from.
-# train_dataset = load_dataset(dataset_name, "triplet", split="train[:50000]") # for testing
-train_dataset = load_dataset(dataset_name, "triplet", split="train")
+# --- Dataset 1: AllNLI ---
+print("\nINFO: Loading dataset 'sentence-transformers/all-nli'...")
+nli_dataset = load_dataset("sentence-transformers/all-nli", "triplet", split="train")
+eval_dataset_nli = load_dataset("sentence-transformers/all-nli", "triplet", split="dev")
+
+# --- Dataset 2: TriviaQA ---
+print("INFO: Loading dataset 'sentence-transformers/trivia-qa-triplet'...")
+trivia_qa_dataset = load_dataset("sentence-transformers/trivia-qa-triplet", "triplet", split="train")
+# This dataset uses 'query' as the anchor, so we rename it to match 'all-nli'
+
+# --- Concatenate Datasets ---
+print("INFO: Concatenating datasets...")
+# Combine the training sets into one large dataset.
+train_dataset = concatenate_datasets([nli_dataset, trivia_qa_dataset])
+# You can shuffle the combined dataset if you want, which is good practice.
+train_dataset = train_dataset.shuffle(seed=42)
+print(f"SUCCESS: Combined training dataset created with {len(train_dataset):,} examples.")
 
 # We'll also load a separate 'development' or 'validation' set. The model never
 # trains on this data; we only use it to check how well the model is learning.
 # eval_dataset_nli = load_dataset(dataset_name, "triplet", split="dev[:1000]") # for testing
-eval_dataset_nli = load_dataset(dataset_name, "triplet", split="dev")
+eval_dataset_nli = load_dataset("sentence-transformers/all-nli", "triplet", split="dev")
 
 # To get a more robust measure of performance, I'm also loading the famous
 # STS benchmark (STSb). It contains pairs of sentences with a human-rated
@@ -132,7 +144,7 @@ loss = MultipleNegativesRankingLoss(model)
 # --- Step 4: Configure Training Arguments ---
 # These are the hyperparameters that control the training process. Think of them as
 # the settings on a machine.
-output_dir = "output/training-small-modernbert"
+output_dir = "ModernBERT-small/training-small-modernbert"
 print(f"\nINFO: Training arguments configured. Checkpoints will be saved to: {output_dir}")
 
 args = SentenceTransformerTrainingArguments(
@@ -142,7 +154,7 @@ args = SentenceTransformerTrainingArguments(
     # --- Key Training Parameters ---
     # After reviewing the literature and based on the size of our dataset,
     # one epoch is a strong and safe starting point. More epochs can lead to overfitting.
-    num_train_epochs=1,
+    num_train_epochs=2,
     per_device_train_batch_size=32, # How many examples to process at once. Adjust based on your GPU's VRAM.
     learning_rate=2e-5, # A standard, effective learning rate for fine-tuning transformers.
     warmup_ratio=0.1, # For the first 10% of training, the learning rate will slowly ramp up. This helps stabilize training.
@@ -226,7 +238,7 @@ print("\n🏁🏁🏁 TRAINING COMPLETE 🏁🏁🏁")
 # Thanks to `load_best_model_at_end=True`, the `model` object in our script
 # is now the version that performed best on our validation set. We can now
 # save this final, high-quality model for future use.
-final_model_path = f"{output_dir}/final-best"
+final_model_path = f"{output_dir}/final"
 print(f"\nINFO: Saving the final, best-performing model to: {final_model_path}")
 model.save_pretrained(final_model_path)
 

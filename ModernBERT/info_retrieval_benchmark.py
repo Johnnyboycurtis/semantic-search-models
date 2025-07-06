@@ -1,38 +1,54 @@
-import random
+# ==============================================================================
+#           Benchmarking Multiple Models for Information Retrieval
+# ==============================================================================
+#
+# PURPOSE:
+# This script (benchmark_ir.py) evaluates the performance of multiple sentence
+# embedding models on a standard Information Retrieval (IR) task.
+#
+# WHAT IT DOES:
+# 1.  Defines a dictionary of models to be benchmarked.
+# 2.  Loads and prepares the `BeIR/webis-touche2020` dataset.
+# 3.  Initializes the `InformationRetrievalEvaluator`.
+# 4.  Loops through each model, runs the evaluation, and stores the results.
+# 5.  Prints a clean, formatted summary table and saves results to a CSV file.
+#
+# ==============================================================================
+
 import logging
 import torch
+import random
 import csv
 from datetime import datetime
+from datasets import load_dataset
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.evaluation import InformationRetrievalEvaluator
-from datasets import load_dataset
 
 # --- Configuration ---
-# Set up logging to show informational messages.
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# --- [FIX] Explicitly define the device ---
-# This is the key fix. We will explicitly tell SentenceTransformers to use the GPU
-# if available. This avoids ambiguity and prevents tensors from being accidentally
-# created on the CPU during the evaluation process.
-device = "cuda" if torch.cuda.is_available() else "cpu"
-logging.info(f"Using device: {device}")
+logging.basicConfig(
+    format="%(asctime)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+)
 
 # --- Step 1: Define Models to Benchmark ---
-# We create a dictionary to hold the models we want to compare.
-# The loop below will iterate through this dictionary.
-# I've added 'bge-small-en-v1.5' as another strong competitor.
+# This dictionary contains the models we want to compare.
+# Please double-check that these paths are correct.
 models_to_benchmark = {
-    "My Small ModernBERT": "./output/training-small-modernbert/final-best",
+    "sts-tuned-ModernBERT": "./ModernBERT-small/sts-tuned-modernbert-small/final",
+    "distilled-sts-tuned-ModernBERT": "./ModernBERT-small/distilled-sts-tuned-modernbert-small/final",
     "all-MiniLM-L6-v2": "sentence-transformers/all-MiniLM-L6-v2",
     "bge-small-en-v1.5": "BAAI/bge-small-en-v1.5",
 }
 
+# Define the device to use
+device = "cuda" if torch.cuda.is_available() else "cpu"
+logging.info(f"Using device: {device}")
+
 # --- Step 2: Load and Prepare the Dataset ---
-# You can easily swap this out for another BEIR dataset, like "BeIR/scifact"
 dataset_name = "BeIR/webis-touche2020"
 logging.info(f"Loading dataset: {dataset_name}")
-logging.info("Loading dataset: BeIR/webis-touche2020")
+
 corpus_data = load_dataset("BeIR/webis-touche2020", "corpus", split="corpus")
 queries_data = load_dataset("BeIR/webis-touche2020", "queries", split="queries")
 relevant_docs_data = load_dataset("BeIR/webis-touche2020-qrels", split="test")
@@ -41,30 +57,19 @@ relevant_docs_data = load_dataset("BeIR/webis-touche2020-qrels", split="test")
 logging.info("Preprocessing corpus by concatenating title and text.")
 corpus_data = corpus_data.map(lambda x: {'text': x['title'] + " " + x['text']}, remove_columns=['title'])
 
-# --- Step 3: Shrink Corpus and Prepare for Evaluator ---
-# This section correctly shrinks the corpus to include all relevant documents
-# plus a random sample of 30,000 other documents for a faster, yet still
-# meaningful, evaluation.
-
+# Shrink the corpus size heavily to only the relevant documents + 30,000 random documents
 logging.info("Shrinking corpus to relevant docs + 30,000 random docs.")
-# 1. Start with the set of all known relevant documents.
 required_corpus_ids = set(map(str, relevant_docs_data["corpus-id"]))
-
-# 2. ADD 30,000 random documents to that set.
-# Note: We check if the corpus is large enough to sample from.
 if len(corpus_data) > 30000:
-    # Get a list of all corpus IDs to sample from
     all_corpus_ids = corpus_data["_id"]
-    # Filter out IDs that are already required to avoid sampling duplicates
     sample_pool = [cid for cid in all_corpus_ids if cid not in required_corpus_ids]
-    # Ensure we don't try to sample more than available
     k = min(30000, len(sample_pool))
     required_corpus_ids.update(random.sample(sample_pool, k=k))
 
 corpus_data = corpus_data.filter(lambda x: x["_id"] in required_corpus_ids)
 logging.info(f"Final shrunk corpus size: {len(corpus_data):,}")
 
-# Convert the datasets to the dictionary format required by the evaluator
+# Convert the datasets to dictionaries
 corpus = dict(zip(corpus_data["_id"], corpus_data["text"]))
 queries = dict(zip(queries_data["_id"], queries_data["text"]))
 relevant_docs = {}
@@ -75,22 +80,19 @@ for qrel in relevant_docs_data:
         relevant_docs[qid] = set()
     relevant_docs[qid].add(corpus_id)
 
-# --- Step 4: Initialize the Evaluator ---
-# The evaluator is created once and then used for each model.
+
+# --- Step 3: Initialize the Evaluator ---
 logging.info("Initializing the InformationRetrievalEvaluator...")
-evaluator_name = f"{dataset_name.split('/')[-1]}-test"
+evaluator_name = "BeIR-touche2020-subset-test"
 ir_evaluator = InformationRetrievalEvaluator(
     queries=queries,
     corpus=corpus,
     relevant_docs=relevant_docs,
     name=evaluator_name,
     show_progress_bar=True,
-    # Key metrics for IR.
-    ndcg_at_k=[10, 100],
-    map_at_k=[100],
 )
 
-# --- Step 5: Run the Benchmark Loop ---
+# --- Step 4: Run the Benchmark Loop ---
 print("\n" + "="*80)
 print(" 🚀 STARTING INFORMATION RETRIEVAL BENCHMARK 🚀")
 print("="*80 + "\n")
@@ -100,48 +102,68 @@ all_results = []
 for model_name, model_path in models_to_benchmark.items():
     print(f"\n--- Evaluating Model: '{model_name}' ---")
     
-    # Load the SentenceTransformer model, explicitly passing the device.
-    model = SentenceTransformer(model_path, device=device)
-    
-    # Run the evaluation
-    results = ir_evaluator(model)
-    
-    # Store results for final summary
-    results_summary = {
-        "Model": model_name,
-        "nDCG@10": results[f"{evaluator_name}_cosine_ndcg@10"],
-        "MAP@100": results[f"{evaluator_name}_cosine_map@100"],
-        "Recall@10": results[f"{evaluator_name}_cosine_recall@10"],
-    }
-    all_results.append(results_summary)
-    
-    print(f"\nResults for '{model_name}' processed.")
+    try:
+        # Load the SentenceTransformer model
+        model = SentenceTransformer(model_path, device=device)
+        
+        # Run the evaluation
+        results = ir_evaluator(model)
+        
+        # Store results for the final summary table
+        results_summary = {
+            "Model": model_name,
+            "nDCG@10": results[f"{evaluator_name}_cosine_ndcg@10"],
+            "MAP@100": results[f"{evaluator_name}_cosine_map@100"],
+            "Recall@10": results[f"{evaluator_name}_cosine_recall@10"],
+            "Precision@10": results[f"{evaluator_name}_cosine_precision@10"],
+        }
+        all_results.append(results_summary)
+        
+        print(f"Evaluation for '{model_name}' complete.")
+
+    except Exception as e:
+        logging.error(f"Failed to evaluate model {model_name}. Error: {e}")
+        # Add a placeholder result so the script can continue
+        all_results.append({
+            "Model": model_name,
+            "nDCG@10": "ERROR",
+            "MAP@100": "ERROR",
+            "Recall@10": "ERROR",
+            "Precision@10": "ERROR",
+        })
+
     print("-" * 40)
 
-# --- Step 6: Save and Display Final Results ---
 
-# Save results to a CSV file for tracking
-timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-csv_filename = f"benchmark_results_{timestamp}.csv"
-with open(csv_filename, 'w', newline='') as csvfile:
-    fieldnames = all_results[0].keys()
-    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-    writer.writeheader()
-    writer.writerows(all_results)
-logging.info(f"Benchmark results saved to {csv_filename}")
-
-# Display a formatted table in the console
+# --- Step 5: Display and Save Final Results ---
 print("\n" + "="*80)
 print(" ✅ BENCHMARK COMPLETE ✅")
 print("="*80 + "\n")
 
-# Print header
-header = all_results[0].keys()
-print(f"{'Model':<30} | {'nDCG@10':<10} | {'MAP@100':<10} | {'Recall@10':<10}")
-print(f"{'-'*30} | {'-'*10} | {'-'*10} | {'-'*10}")
+# Save results to a CSV file for tracking
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+csv_filename = f"ir_benchmark_results_{timestamp}.csv"
+if all_results:
+    with open(csv_filename, 'w', newline='') as csvfile:
+        fieldnames = all_results[0].keys()
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(all_results)
+    logging.info(f"Benchmark results saved to {csv_filename}")
 
-# Print rows
-for res in all_results:
-    print(f"{res['Model']:<30} | {res['nDCG@10']:<10.4f} | {res['MAP@100']:<10.4f} | {res['Recall@10']:<10.4f}")
+# Print a formatted summary table
+if all_results:
+    header = all_results[0].keys()
+    print(f"{'Model':<45} | {'nDCG@10':<10} | {'MAP@100':<10} | {'Recall@10':<10} | {'Precision@10':<12}")
+    print(f"{'-'*45} | {'-'*10} | {'-'*10} | {'-'*10} | {'-'*12}")
+
+    for res in all_results:
+        ndcg_val = f"{res['nDCG@10']:.4f}" if isinstance(res['nDCG@10'], float) else res['nDCG@10']
+        map_val = f"{res['MAP@100']:.4f}" if isinstance(res['MAP@100'], float) else res['MAP@100']
+        recall_val = f"{res['Recall@10']:.4f}" if isinstance(res['Recall@10'], float) else res['Recall@10']
+        precision_val = f"{res['Precision@10']:.4f}" if isinstance(res['Precision@10'], float) else res['Precision@10']
+        print(f"{res['Model']:<45} | {ndcg_val:<10} | {map_val:<10} | {recall_val:<10} | {precision_val:<12}")
+else:
+    print("No models were evaluated.")
 
 print("\n" + "="*80)
