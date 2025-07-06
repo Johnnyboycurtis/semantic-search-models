@@ -4,9 +4,17 @@
 
 1. Run `python build_and_save_small_modernbert.py`
 
-2. Run `train_small_modernbert.py`
+2. Run `python train_small_modernbert.py`
 
-### Training Output
+3. Run `python distil_modernbert.py`
+
+4. (Optional) Run `python post_train_distilled_model.py`
+
+5. Run `python sts_fine_tuning.py`
+
+6. Run `python benchmark_hotpotqa.py` (sample; full dataset takes ~2 hours)
+
+### Example Training Output
 
 ```python
 python train_small_modernbert.py
