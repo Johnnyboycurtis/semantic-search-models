@@ -95,8 +95,12 @@ print("="*80 + "\n")
 
 
 # Load the SentenceTransformer model from the path or Hugging Face Hub.
-#model_path = "./output/training-small-modernbert/final-best"
-model_path = "sentence-transformers/all-MiniLM-L6-v2"
+model_path = "ModernBERT-small/distilled-modernbert-small/final"
+# model_path = "./ModernBERT-small/training-small-modernbert/final"
+# model_path = "sentence-transformers/all-MiniLM-L6-v2"
+# model_path = "BAAI/bge-base-en-v1.5"
+# model_path = "./output/sts-tuned-modernbert-small/final"
+# model_path = "ModernBERT-small/distilled-kldiv-ModernBERT-small/final"
 
 model = SentenceTransformer(model_path, model_kwargs={"torch_dtype": torch.bfloat16})
 print(model)
