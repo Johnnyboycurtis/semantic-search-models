@@ -47,7 +47,7 @@ logging.basicConfig(
 # fine-tuned on the AllNLI dataset. This provides a strong foundation.
 # Ensure this path points to your best NLI-trained model.
 # model_path = './ModernBERT-small/training-small-modernbert/final'
-model_path = "ModernBERT-small/distilled-modernbert-small/final"
+model_path = "output/training-modernbert-multi-dataset-2025-07-06_08-43-53/checkpoint-35000"
 
 # Define where we will save the final, STS-tuned model.
 #output_dir = "./ModernBERT-small/sts-tuned-modernbert-small"
@@ -107,11 +107,11 @@ args = SentenceTransformerTrainingArguments(
     bf16=True, # Recommended for modern GPUs
     learning_rate=2e-5,
     eval_strategy="steps",
-    eval_steps=100,
+    eval_steps=200,
     save_strategy="steps",
-    save_steps=100,
+    save_steps=200,
     save_total_limit=2,
-    logging_steps=50,
+    logging_steps=100,
     metric_for_best_model="sts-dev_spearman_cosine",
     load_best_model_at_end=True,
     run_name="sts-finetune",
