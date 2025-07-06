@@ -47,7 +47,7 @@ logging.basicConfig(
 # fine-tuned on the AllNLI dataset. This provides a strong foundation.
 # Ensure this path points to your best NLI-trained model.
 # model_path = './ModernBERT-small/training-small-modernbert/final'
-model_path = "output/training-modernbert-multi-dataset-2025-07-06_08-43-53/checkpoint-35000"
+model_path = "ModernBERT-small/distilled-kldiv-ModernBERT-small/checkpoint-2266"
 
 # Define where we will save the final, STS-tuned model.
 #output_dir = "./ModernBERT-small/sts-tuned-modernbert-small"
