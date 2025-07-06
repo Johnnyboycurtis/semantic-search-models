@@ -21,7 +21,7 @@
 import logging
 from datetime import datetime
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 import pandas as pd
 
 from sentence_transformers import (
@@ -67,9 +67,36 @@ student_model = SentenceTransformer(student_model_path, model_kwargs=model_kwarg
 # --- Step 2: Load and Prepare Datasets ---
 # We use a triplet dataset for this loss function.
 logging.info("Loading AllNLI dataset...")
-# For demonstration, we'll use a smaller subset. For best results, use the full dataset.
-train_dataset = load_dataset("sentence-transformers/all-nli", "triplet", split="train") #.select(range(20000))
+
+# --- Dataset 1: AllNLI ---
+print("\nINFO: Loading dataset 'sentence-transformers/all-nli'...")
+nli_dataset = load_dataset("sentence-transformers/all-nli", "triplet", split="train").select(range(20000))
 eval_dataset_nli = load_dataset("sentence-transformers/all-nli", "triplet", split="dev")
+
+# --- Dataset 2: TriviaQA ---
+print("INFO: Loading dataset 'sentence-transformers/trivia-qa-triplet'...")
+trivia_qa_dataset = load_dataset("sentence-transformers/trivia-qa-triplet", "triplet", split="train").select(range(30000))
+# This dataset uses 'query' as the anchor, so we rename it to match 'all-nli'
+
+
+# --- Dataset 2: MS MARCO ---
+print("Loading dataset 'sentence-transformers/msmarco-msmarco-distilbert-base-v3'...")
+msmarco_dataset = load_dataset("sentence-transformers/msmarco-msmarco-distilbert-base-v3", "triplet", split="train").select(range(100000))
+# This dataset uses 'query' as the anchor, so we rename it to match 'all-nli'
+msmarco_dataset = msmarco_dataset.rename_column("query", "anchor")
+msmarco_splits = msmarco_dataset.train_test_split(test_size=5000, seed=42)
+msmarco_train_dataset = msmarco_splits["train"]
+eval_dataset_msmarco = msmarco_splits["test"]
+del msmarco_dataset
+
+
+# --- Concatenate Datasets ---
+print("INFO: Concatenating datasets...")
+# Combine the training sets into one large dataset.
+train_dataset = concatenate_datasets([nli_dataset, trivia_qa_dataset, msmarco_train_dataset])
+# You can shuffle the combined dataset if you want, which is good practice.
+train_dataset = train_dataset.shuffle(seed=7936)
+print(f"SUCCESS: Combined training dataset created with {len(train_dataset):,} examples.")
 
 logging.info(f"Training dataset size: {len(train_dataset):,}")
 
@@ -119,7 +146,17 @@ dev_evaluator_nli = TripletEvaluator(
 )
 
 
-evaluator = evaluation.SequentialEvaluator([dev_evaluator_stsb, dev_evaluator_nli])
+# We also use a TripletEvaluator on the NLI dev set.
+dev_evaluator_msmarco = TripletEvaluator(
+    anchors=eval_dataset_msmarco["anchor"],
+    positives=eval_dataset_msmarco["positive"],
+    negatives=eval_dataset_msmarco["negative"],
+    name="msmarco-dev", # A label for the output logs
+)
+
+
+
+evaluator = evaluation.SequentialEvaluator([dev_evaluator_stsb, dev_evaluator_nli, dev_evaluator_msmarco])
 
 # Define the distillation loss function
 train_loss = losses.DistillKLDivLoss(model=student_model)
@@ -137,12 +174,12 @@ args = SentenceTransformerTrainingArguments(
     bf16=True,
     learning_rate=5e-5, # Can often use a slightly higher LR for distillation
     eval_strategy="steps",
-    eval_steps=1000,
+    eval_steps=500,
     save_strategy="steps",
-    save_steps=1000,
-    save_total_limit=2,
+    save_steps=500,
+    save_total_limit=4,
     logging_steps=100,
-    metric_for_best_model="sts-dev_spearman_cosine",
+    metric_for_best_model="eval_msmarco-dev_cosine_accuracy", #"eval_msmarco-dev_cosine_accuracy", #"sts-dev_spearman_cosine",
     load_best_model_at_end=True,
     run_name="distill-kldiv-modernbert",
 )
