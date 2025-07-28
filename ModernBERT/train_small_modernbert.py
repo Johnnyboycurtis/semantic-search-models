@@ -47,6 +47,10 @@ from sentence_transformers.evaluation import (
     SimilarityFunction,
 )
 from datasets import load_dataset, concatenate_datasets
+import datetime
+
+START_TIME = datetime.datetime.now()
+print(f"START: {START_TIME}")
 
 # --- Step 1: Initialize Our Model ---
 # Here, we're not starting with a pre-trained model from the internet. Instead,
@@ -61,7 +65,14 @@ print(f"INFO: Loading our custom blank model architecture from: {model_path}")
 # Our model will have two essential parts:
 # 1. A Transformer layer: This is our ModernBERT model. It reads the text
 #    and outputs embeddings for every single token.
-word_embedding_model = models.Transformer(model_path)
+word_embedding_model = models.Transformer(
+    model_path,
+    model_args={
+        "torch_dtype": torch.bfloat16,
+        "attn_implementation": "flash_attention_2",
+        "device_map": "cuda"
+    }
+)
 
 # 2. A Pooling layer: The transformer gives us many token embeddings, but we need
 #    a single vector for the whole sentence. The pooling layer handles this by
@@ -69,19 +80,19 @@ word_embedding_model = models.Transformer(model_path)
 pooling_model = models.Pooling(
     word_embedding_model.get_word_embedding_dimension(), # Gets the hidden size (e.g., 256)
     pooling_mode='mean'
-)
+).to("cuda")
 
 # Now, we assemble these two modules into a final SentenceTransformer model.
 # The `SentenceTransformerModelCardData` is good practice; it helps auto-generate
 # a README file if we ever decide to upload our model to the Hugging Face Hub.
 model = SentenceTransformer(
-    modules=[word_embedding_model, pooling_model],
+    modules=[word_embedding_model, pooling_model], # This is the key: assembling modules
     model_card_data=SentenceTransformerModelCardData(
         language="en",
         license="apache-2.0",
         model_name="ModernBERT-small for Sentence Similarity",
     ),
-    model_kwargs={"torch_dtype": torch.bfloat16}
+    device="cuda", # This moves the entire assembled model to CUDA
 )
 print("SUCCESS: Blank ModernBERT model loaded into a SentenceTransformer wrapper.")
 print(model)
@@ -108,12 +119,26 @@ print("INFO: Loading dataset 'sentence-transformers/trivia-qa-triplet'...")
 trivia_qa_dataset = load_dataset("sentence-transformers/trivia-qa-triplet", "triplet", split="train")
 # This dataset uses 'query' as the anchor, so we rename it to match 'all-nli'
 
+
+# --- Dataset 2: MS MARCO ---
+print("Loading dataset 'sentence-transformers/msmarco-msmarco-distilbert-base-v3'...")
+msmarco_dataset = load_dataset("sentence-transformers/msmarco-msmarco-distilbert-base-v3", "triplet", split="train")
+# This dataset uses 'query' as the anchor, so we rename it to match 'all-nli'
+msmarco_dataset = msmarco_dataset.rename_column("query", "anchor")
+
+# --- NEW Dataset: Quora Duplicates ---
+print("INFO: Loading dataset 'sentence-transformers/quora-duplicates'...")
+quora_dataset = load_dataset("sentence-transformers/quora-duplicates", "triplet", split="train")
+# Quora Duplicates is already in triplet format: 'anchor', 'positive', 'negative'
+# No column renaming needed if it's already in this format, otherwise rename.
+# (Checking the dataset on Hugging Face Hub confirms it's already 'anchor', 'positive', 'negative')
+
 # --- Concatenate Datasets ---
 print("INFO: Concatenating datasets...")
 # Combine the training sets into one large dataset.
-train_dataset = concatenate_datasets([nli_dataset, trivia_qa_dataset])
+train_dataset = concatenate_datasets([nli_dataset, trivia_qa_dataset, msmarco_dataset, quora_dataset])
 # You can shuffle the combined dataset if you want, which is good practice.
-train_dataset = train_dataset.shuffle(seed=42)
+train_dataset = train_dataset.shuffle(seed=7936)
 print(f"SUCCESS: Combined training dataset created with {len(train_dataset):,} examples.")
 
 # We'll also load a separate 'development' or 'validation' set. The model never
@@ -158,7 +183,9 @@ args = SentenceTransformerTrainingArguments(
     per_device_train_batch_size=32, # How many examples to process at once. Adjust based on your GPU's VRAM.
     learning_rate=2e-5, # A standard, effective learning rate for fine-tuning transformers.
     warmup_ratio=0.1, # For the first 10% of training, the learning rate will slowly ramp up. This helps stabilize training.
-    fp16=True, # Use 16-bit floating point precision. Makes training faster and uses less memory on compatible GPUs.
+    fp16=False, # Use 16-bit floating point precision. Makes training faster and uses less memory on compatible GPUs.
+    bf16=True,
+    bf16_full_eval=True,
 
     # This is a recommendation from the docs for our specific loss function.
     # It ensures each training batch contains unique sentences, which makes the
@@ -167,19 +194,19 @@ args = SentenceTransformerTrainingArguments(
 
     # --- Evaluation and Saving Strategy ---
     eval_strategy="steps", # How often to evaluate. We'll do it based on a number of steps.
-    eval_steps=500,       # Run the evaluation every 500 training steps.
+    eval_steps=2000,       # Run the evaluation every 500 training steps.
     save_strategy="steps", # How often to save a model checkpoint.
-    save_steps=500,
-    save_total_limit=2,    # To save disk space, only keep the 2 most recent checkpoints.
+    save_steps=2000,
+    save_total_limit=4,    # To save disk space, only keep the 2 most recent checkpoints.
 
     # This is a crucial setting. At the end of training, it will automatically
     # load the checkpoint that had the best performance on our evaluation set.
-    load_best_model_at_end=True,
-    metric_for_best_model="sts-dev_spearman_cosine", # The STS benchmark is the most common and respected way to report the performance of sentence embedding models.
+    load_best_model_at_end=False,
+    metric_for_best_model='eval_sts-dev_spearman_cosine', #"sts-dev_spearman_cosine", # The STS benchmark is the most common and respected way to report the performance of sentence embedding models.
     # The available evaluation metrics are: ['eval_all-nli-dev_cosine_accuracy', 'eval_sts-dev_pearson_cosine', 'eval_sts-dev_spearman_cosine', 'eval_sequential_score', 'eval_runtime', 'eval_samples_per_second', 'eval_steps_per_second', 'epoch']
 
     # --- Logging and Reporting ---
-    logging_steps=100, # How often to print the training loss to the console.
+    logging_steps=500, # How often to print the training loss to the console.
     run_name="small-modernbert-all-nli", # A name for the run, useful if you use Weights & Biases.
 )
 
@@ -189,24 +216,20 @@ args = SentenceTransformerTrainingArguments(
 # interpretable, real-world metrics. I've set up two:
 
 print("\nINFO: Setting up evaluators for validation...")
+
 # Evaluator 1: Checks our main training objective on the NLI dev set.
-# It measures "triplet accuracy": what percentage of the time is the model
-# correctly identifying the 'positive' sentence as more similar than the 'negative'?
 nli_evaluator = TripletEvaluator(
-    anchors=eval_dataset_nli["anchor"],
-    positives=eval_dataset_nli["positive"],
-    negatives=eval_dataset_nli["negative"],
-    name="all-nli-dev", # A label for the output logs
+    anchors=list(eval_dataset_nli["anchor"]),    # Corrected: Convert to list
+    positives=list(eval_dataset_nli["positive"]), # Corrected: Convert to list
+    negatives=list(eval_dataset_nli["negative"]), # Corrected: Convert to list
+    name="all-nli-dev",
 )
 
 # Evaluator 2: Checks performance on the STSb dataset.
-# This measures the "Spearman correlation" between our model's similarity scores
-# and the human-annotated scores. A higher correlation means our model's
-# sense of similarity is closer to a human's.
 stsb_evaluator = EmbeddingSimilarityEvaluator(
-    sentences1=eval_dataset_stsb["sentence1"],
-    sentences2=eval_dataset_stsb["sentence2"],
-    scores=eval_dataset_stsb["score"],
+    sentences1=list(eval_dataset_stsb["sentence1"]), # Corrected: Convert to list
+    sentences2=list(eval_dataset_stsb["sentence2"]), # Corrected: Convert to list
+    scores=list(eval_dataset_stsb["score"]),        # Corrected: Convert to list
     main_similarity=SimilarityFunction.COSINE,
     name="sts-dev",
 )
@@ -243,3 +266,5 @@ print(f"\nINFO: Saving the final, best-performing model to: {final_model_path}")
 model.save_pretrained(final_model_path)
 
 print(f"\n✅ All done! Your newly trained sentence-embedding model is ready at '{final_model_path}'.")
+END_TIME = datetime.datetime.now()
+print(f"START: {START_TIME} and END: {END_TIME} DURATION: {END_TIME - START_TIME}")
