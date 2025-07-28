@@ -59,46 +59,85 @@ logging.info(f"Teacher model: {teacher_model_name}")
 logging.info(f"Student model (initial): {student_model_path}")
 
 # Load models with bfloat16 for performance gains on compatible hardware
-model_kwargs = {"torch_dtype": torch.bfloat16}
-teacher_model = SentenceTransformer(teacher_model_name, model_kwargs=model_kwargs)
+model_kwargs = {
+        "torch_dtype": torch.bfloat16,
+        "attn_implementation": "flash_attention_2",
+        "device_map": "cuda"
+    }
+teacher_model = SentenceTransformer(teacher_model_name, model_kwargs={"torch_dtype": torch.bfloat16,})
 student_model = SentenceTransformer(student_model_path, model_kwargs=model_kwargs)
 
 
 # --- Step 2: Load and Prepare Datasets ---
-# We use a triplet dataset for this loss function.
-logging.info("Loading AllNLI dataset...")
+# We use triplet and positive-pair datasets for this loss function.
+logging.info("Loading datasets for distillation...")
 
-# --- Dataset 1: AllNLI ---
+# --- Dataset 1: AllNLI (Triplets) ---
 print("\nINFO: Loading dataset 'sentence-transformers/all-nli'...")
-nli_dataset = load_dataset("sentence-transformers/all-nli", "triplet", split="train").select(range(20000))
+# Using a larger subset for distillation if resources allow
+nli_dataset = load_dataset("sentence-transformers/all-nli", "triplet", split="train").select(range(100000)) # Increased from 20k
 eval_dataset_nli = load_dataset("sentence-transformers/all-nli", "triplet", split="dev")
 
-# --- Dataset 2: TriviaQA ---
+# --- Dataset 2: TriviaQA (Triplets) ---
 print("INFO: Loading dataset 'sentence-transformers/trivia-qa-triplet'...")
-trivia_qa_dataset = load_dataset("sentence-transformers/trivia-qa-triplet", "triplet", split="train").select(range(30000))
-# This dataset uses 'query' as the anchor, so we rename it to match 'all-nli'
+# Using a larger subset for distillation if resources allow
+trivia_qa_dataset = load_dataset("sentence-transformers/trivia-qa-triplet", "triplet", split="train") # Increased from 30k
+trivia_qa_dataset = trivia_qa_dataset #.rename_column("query", "anchor") # Ensure consistency
 
-
-# --- Dataset 2: MS MARCO ---
+# --- Dataset 3: MS MARCO (Triplets) ---
 print("Loading dataset 'sentence-transformers/msmarco-msmarco-distilbert-base-v3'...")
-msmarco_dataset = load_dataset("sentence-transformers/msmarco-msmarco-distilbert-base-v3", "triplet", split="train").select(range(100000))
-# This dataset uses 'query' as the anchor, so we rename it to match 'all-nli'
+# Using a larger subset for distillation if resources allow
+msmarco_dataset = load_dataset("sentence-transformers/msmarco-msmarco-distilbert-base-v3", "triplet", split="train").select(range(300000)) # Increased from 110k
 msmarco_dataset = msmarco_dataset.rename_column("query", "anchor")
-msmarco_splits = msmarco_dataset.train_test_split(test_size=5000, seed=42)
+msmarco_splits = msmarco_dataset.train_test_split(test_size=10000, seed=42)
 msmarco_train_dataset = msmarco_splits["train"]
 eval_dataset_msmarco = msmarco_splits["test"]
 del msmarco_dataset
 
+# --- NEW Dataset 4: Quora Duplicates (Triplets) ---
+print("INFO: Loading dataset 'sentence-transformers/quora-duplicates'...")
+quora_dataset = load_dataset("sentence-transformers/quora-duplicates", "triplet", split="train").select(range(100000)) # Sample a subset
+# This dataset is already in 'anchor', 'positive', 'negative' format
 
-# --- Concatenate Datasets ---
-print("INFO: Concatenating datasets...")
-# Combine the training sets into one large dataset.
-train_dataset = concatenate_datasets([nli_dataset, trivia_qa_dataset, msmarco_train_dataset])
-# You can shuffle the combined dataset if you want, which is good practice.
+# --- NEW Dataset 5: GooAQ (Positive Pairs for in-batch negatives) ---
+print("INFO: Loading dataset 'sentence-transformers/gooaq'...")
+gooaq_dataset = load_dataset("sentence-transformers/gooaq", split="train").select(range(200000)) # Sample a subset
+gooaq_dataset = gooaq_dataset.rename_columns({"question": "anchor", "answer": "positive"})
+
+# --- NEW Dataset 6: ServiceNow/repliqa (Positive Pairs for in-batch negatives) ---
+# Assuming 'repliqa' has 'question' and 'answer' columns for positive pairs
+# You'll need to load this from your local path or Hugging Face if it's public
+# print("INFO: Loading dataset 'ServiceNow/repliqa'...")
+# repliqa_dataset = load_dataset("ServiceNow/repliqa", split="train").select(range(YOUR_DESIRED_SIZE))
+# repliqa_dataset = repliqa_dataset.rename_columns({"question": "anchor", "answer": "positive"})
+
+
+# --- Concatenate All Training Datasets ---
+print("INFO: Concatenating all training datasets...")
+train_dataset = concatenate_datasets([
+    nli_dataset,
+    trivia_qa_dataset,
+    msmarco_train_dataset,
+    quora_dataset,
+    gooaq_dataset,
+    # repliqa_dataset, # Uncomment if you add repliqa
+])
 train_dataset = train_dataset.shuffle(seed=7936)
 print(f"SUCCESS: Combined training dataset created with {len(train_dataset):,} examples.")
+logging.info(f"Total training dataset size: {len(train_dataset):,}")
 
-logging.info(f"Training dataset size: {len(train_dataset):,}")
+# --- IMPORTANT: Filter out None or empty string values from the dataset ---
+logging.info("Filtering out examples with None or empty strings in text columns...")
+original_length = len(train_dataset)
+train_dataset = train_dataset.filter(
+    lambda example: example["anchor"] is not None and example["anchor"].strip() != "" and
+                    example["positive"] is not None and example["positive"].strip() != "" and
+                    example["negative"] is not None and example["negative"].strip() != ""
+)
+filtered_length = len(train_dataset)
+if original_length != filtered_length:
+    logging.warning(f"Filtered {original_length - filtered_length} examples containing None or empty text fields.")
+logging.info(f"Training dataset size after filtering: {len(train_dataset):,}")
 
 
 # --- Step 3: Pre-compute Teacher Similarity Scores ---
@@ -128,57 +167,71 @@ train_dataset = train_dataset.map(compute_teacher_scores, batched=True, batch_si
 
 
 # --- Step 4: Set up Evaluators and Loss ---
-# We still use STSb to measure the "real-world" performance.
+
+# --- Evaluator 1: STS-b ---
 stsb_eval_dataset = load_dataset("sentence-transformers/stsb", split="validation")
+# Convert columns to lists before passing them to the evaluator
+stsb_sentences1 = list(stsb_eval_dataset["sentence1"])
+stsb_sentences2 = list(stsb_eval_dataset["sentence2"])
+stsb_scores = list(stsb_eval_dataset["score"])
+
 dev_evaluator_stsb = EmbeddingSimilarityEvaluator(
-    sentences1=stsb_eval_dataset["sentence1"],
-    sentences2=stsb_eval_dataset["sentence2"],
-    scores=stsb_eval_dataset["score"],
+    sentences1=stsb_sentences1,
+    sentences2=stsb_sentences2,
+    scores=stsb_scores,
     name="sts-dev"
 )
 
-# We also use a TripletEvaluator on the NLI dev set.
+# --- Evaluator 2: NLI Triplets ---
+# Convert columns to lists before passing them to the evaluator
+nli_anchors = list(eval_dataset_nli["anchor"])
+nli_positives = list(eval_dataset_nli["positive"])
+nli_negatives = list(eval_dataset_nli["negative"])
+
 dev_evaluator_nli = TripletEvaluator(
-    anchors=eval_dataset_nli["anchor"],
-    positives=eval_dataset_nli["positive"],
-    negatives=eval_dataset_nli["negative"],
-    name="all-nli-dev", # A label for the output logs
+    anchors=nli_anchors,
+    positives=nli_positives,
+    negatives=nli_negatives,
+    name="all-nli-dev",
 )
 
+# --- Evaluator 3: MS MARCO Triplets ---
+# Convert columns to lists before passing them to the evaluator
+msmarco_anchors = list(eval_dataset_msmarco["anchor"])
+msmarco_positives = list(eval_dataset_msmarco["positive"])
+msmarco_negatives = list(eval_dataset_msmarco["negative"])
 
-# We also use a TripletEvaluator on the NLI dev set.
 dev_evaluator_msmarco = TripletEvaluator(
-    anchors=eval_dataset_msmarco["anchor"],
-    positives=eval_dataset_msmarco["positive"],
-    negatives=eval_dataset_msmarco["negative"],
-    name="msmarco-dev", # A label for the output logs
+    anchors=msmarco_anchors,
+    positives=msmarco_positives,
+    negatives=msmarco_negatives,
+    name="msmarco-dev",
 )
 
-
-
+# Combine the evaluators into a sequence
 evaluator = evaluation.SequentialEvaluator([dev_evaluator_stsb, dev_evaluator_nli, dev_evaluator_msmarco])
 
+# --- Step 5: Configure and Run the Trainer ---
 # Define the distillation loss function
 train_loss = losses.DistillKLDivLoss(model=student_model)
 logging.info("Using DistillKLDivLoss")
 
-
-# --- Step 5: Configure and Run the Trainer ---
 args = SentenceTransformerTrainingArguments(
     output_dir=output_dir,
-    num_train_epochs=1, # 1 epoch is usually enough for distillation
+    num_train_epochs=3, # 1 epoch is usually enough for distillation
     per_device_train_batch_size=train_batch_size,
     per_device_eval_batch_size=train_batch_size,
     warmup_ratio=0.1,
     fp16=False,
     bf16=True,
+    bf16_full_eval=True,
     learning_rate=5e-5, # Can often use a slightly higher LR for distillation
     eval_strategy="steps",
-    eval_steps=500,
+    eval_steps=1000,
     save_strategy="steps",
-    save_steps=500,
+    save_steps=1000,
     save_total_limit=4,
-    logging_steps=100,
+    logging_steps=500,
     metric_for_best_model="eval_msmarco-dev_cosine_accuracy", #"eval_msmarco-dev_cosine_accuracy", #"sts-dev_spearman_cosine",
     load_best_model_at_end=True,
     run_name="distill-kldiv-modernbert",
