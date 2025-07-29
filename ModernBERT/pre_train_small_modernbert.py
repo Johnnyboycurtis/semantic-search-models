@@ -38,10 +38,17 @@ from sentence_transformers.evaluation import (
 )
 import torch
 
-# --- Basic Setup ---
+# --- 0. Basic Setup and Logging ---
 logging.basicConfig(format="%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S", level=logging.INFO)
 START_TIME = datetime.datetime.now()
-logging.info(f"START: {START_TIME}")
+logging.info(f"Script started at: {START_TIME}")
+
+# Define output directory for model checkpoints and logs
+OUTPUT_DIR_BASE = "ModernBERT-small"
+RUN_TIMESTAMP = START_TIME.strftime('%Y-%m-%d_%H-%M-%S')
+output_dir = Path(OUTPUT_DIR_BASE) / f"pre-trained"
+output_dir.mkdir(parents=True, exist_ok=True) # Ensure directory exists
+logging.info(f"Training outputs will be saved to: {output_dir}")
 
 # --- Step 1: Initialize Our Model ---
 # We load the blank ModernBERT architecture. The SentenceTransformer class
@@ -76,8 +83,6 @@ nli_dataset = load_dataset("sentence-transformers/all-nli", "triplet", split="tr
 quora_dataset = load_dataset("sentence-transformers/quora-duplicates", "triplet", split="train")
 natural_questions = load_dataset("sentence-transformers/natural-questions", split="train")
 stsb_dataset = load_dataset("sentence-transformers/stsb", split="train")
-
-# New Datasets from the example
 sentence_compression_dataset = load_dataset("sentence-transformers/sentence-compression", split="train")
 simple_wiki_dataset = load_dataset("sentence-transformers/simple-wiki", split="train")
 altlex_dataset = load_dataset("sentence-transformers/altlex", split="train")
@@ -105,101 +110,86 @@ train_dataset = {
 logging.info(f"Training with {len(train_dataset)} datasets: {list(train_dataset.keys())}")
 
 
-# --- Step 3: Define Multiple Loss Functions ---
 
-### Loss Function Upgrades
-
-# To further improve model performance and output quality, the training loss functions were upgraded based on the following rationale:
-
-# 1.  **`MultipleNegativesRankingLoss` → `MultipleNegativesSymmetricRankingLoss`**
-#     *   **Reasoning:** The original loss function only trains in one direction (e.g., `query → answer`). 
-# The symmetric version adds a second, "backward" loss term (`answer → query`). This creates a more robust and versatile semantic understanding, as the model must learn a reciprocal relationship between sentence pairs, leading to a higher-quality embedding space.
-
-# 2.  **`CosineSimilarityLoss` → `CoSENTLoss`**
-#     *   **Reasoning:** `CosineSimilarityLoss` can sometimes produce a compressed range of similarity scores. 
-# `CoSENTLoss` is a more modern alternative that directly optimizes the relative ranking of all pairs in a batch. This provides a stronger training signal and typically results in better-calibrated similarity scores that are more spread out and intuitive, improving the model's performance on regression-based similarity tasks.
-
-# We create a dictionary that maps each dataset (by its key from the dictionary above)
-# to the appropriate loss function.
+# --- 3. Define Multiple Loss Functions ---
 logging.info("\nDefining multiple loss functions for each dataset type...")
 
 # Loss for triplet and pair datasets (contrastive learning)
-# mnrl_loss = losses.MultipleNegativesRankingLoss(model)
-mnrl_loss = losses.CachedMultipleNegativesSymmetricRankingLoss(model) # upgrade
+# Upgraded from MultipleNegativesRankingLoss for symmetric training and caching.
+mnsrl_loss = losses.CachedMultipleNegativesSymmetricRankingLoss(model)
 
 # Loss for STS dataset (regression task)
-#cosine_loss = losses.CosineSimilarityLoss(model)
-cosine_loss = losses.CoSENTLoss(model) # upgrade
+# Upgraded from CosineSimilarityLoss for better calibrated similarity scores.
+cosent_loss = losses.CoSENTLoss(model)
 
-# The mapping dictionary. Keys MUST match the keys in `train_dataset`.
-# For datasets that are just lists of sentences or pairs, MNSRL can still work
-# by treating them as (sentence1, sentence2) pairs or by generating in-batch negatives.
+# Map each dataset key to its appropriate loss function.
+# Keys MUST match the keys in `train_dataset`.
+# For datasets that are lists of sentences or pairs, MNSL will use in-batch negatives.
 loss_functions = {
-    "nli": mnrl_loss,
-    "quora": mnrl_loss,
-    "natural_questions": mnrl_loss,
-    "stsb": cosine_loss, # STS is a regression task, so CoSENTLoss is ideal
-    "sentence_compression": mnrl_loss, # (sentence_1, sentence_2) pairs
-    "simple_wiki": mnrl_loss, # Single sentences, MNSRL will use in-batch negatives
-    "altlex": mnrl_loss, # (sentence1, sentence2) pairs
-    "coco_captions": mnrl_loss, # Single sentences, MNSRL will use in-batch negatives
-    "flickr30k_captions": mnrl_loss, # Single sentences, MNSRL will use in-batch negatives
-    "yahoo_answers": mnrl_loss, # (title, question, answer) can be treated as pairs for MNSRL
-    "stack_exchange": mnrl_loss, # (title1, title2) pairs
+    "nli": mnsrl_loss,
+    "quora": mnsrl_loss,
+    "natural_questions": mnsrl_loss,
+    "stsb": cosent_loss, # STS is a regression task, CoSENTLoss is ideal
+    "sentence_compression": mnsrl_loss, # (sentence_1, sentence_2) pairs
+    "simple_wiki": mnsrl_loss, # Single sentences, MNSL will use in-batch negatives
+    "altlex": mnsrl_loss, # (sentence1, sentence2) pairs
+    "coco_captions": mnsrl_loss, # Single sentences, MNSL will use in-batch negatives
+    "flickr30k_captions": mnsrl_loss, # Single sentences, MNSL will use in-batch negatives
+    "yahoo_answers": mnsrl_loss, # (title, question, answer) can be treated as pairs for MNSL
+    "stack_exchange": mnsrl_loss, # (title1, title2) pairs
 }
 
 
-
-# --- Step 4: Configure Training Arguments ---
+# --- 4. Configure Training Arguments ---
 # These are the hyperparameters for our training run.
-output_dir = f"ModernBERT-small/training-run-{START_TIME.strftime('%Y-%m-%d_%H-%M-%S')}"
-logging.info(f"\nTraining arguments configured. Checkpoints will be saved to: {output_dir}")
+logging.info("Configuring training arguments...")
 
 args = SentenceTransformerTrainingArguments(
-    # Required: Where to save checkpoints.
-    output_dir=output_dir,
+    output_dir=str(output_dir), # Required: Where to save checkpoints.
 
     # --- Key Training Parameters ---
     num_train_epochs=1, # 1 epoch is a strong baseline for large, mixed datasets
     per_device_train_batch_size=32, # Adjust based on your GPU's VRAM
-    # Use a higher learning rate for training from scratch, as per the ModernBERT paper
-    learning_rate=5e-4,
-    warmup_ratio=0.05, # 5% of steps for warmup
+    learning_rate=5e-4, # Higher learning rate for training from scratch (as per ModernBERT paper)
+    warmup_ratio=0.05, # 5% of steps for learning rate warmup
     
     # Performance optimizations
-    fp16=False, # Set to True if your GPU is not Ampere/Hopper
+    fp16=False, # Set to True if your GPU does not support bf16
     bf16=True,  # Set to True for Ampere/Hopper GPUs (A100, H100, RTX 30/40xx)
-    bf16_full_eval=True,
+    bf16_full_eval=True, # Use bf16 for evaluation as well
     
     # Multi-dataset sampling strategy
-    multi_dataset_batch_sampler=MultiDatasetBatchSamplers.PROPORTIONAL, # round robin?
+    # PROPORTIONAL samples batches from each dataset with a probability proportional to its size.
+    # This ensures larger datasets contribute more training steps, which is generally desired
+    # for a diverse set of datasets with varying sizes.
+    multi_dataset_batch_sampler=MultiDatasetBatchSamplers.PROPORTIONAL,
 
     # --- Evaluation and Saving Strategy ---
-    eval_strategy="steps",
+    eval_strategy="steps", # Evaluate every 'eval_steps'
     eval_steps=2000,
-    save_strategy="steps",
+    save_strategy="steps", # Save checkpoint every 'save_steps'
     save_steps=2000,
-    save_total_limit=4,
+    save_total_limit=4, # Keep only the best 4 checkpoints
     
-    # Load the best model at the end of training
+    # Load the best model at the end of training based on validation metric
     load_best_model_at_end=True,
-    metric_for_best_model="sts-dev_spearman_cosine",
+    metric_for_best_model="sts-dev_spearman_cosine", # Metric to determine the "best" model
 
     # --- Logging and Reporting ---
     logging_steps=500,
-    run_name="small-modernbert-multi-task",
+    run_name="small-modernbert-multi-task", # Name for logging/tracking tools (e.g., Weights & Biases)
 )
 
 
-# --- Step 5: Set Up the Evaluators ---
-# We use evaluators to get interpretable metrics on validation sets.
+# --- 5. Set Up the Evaluators ---
+# We use evaluators to get interpretable metrics on validation sets during training.
 logging.info("\nSetting up evaluators for validation...")
 
 # Load evaluation datasets
 eval_nli = load_dataset("sentence-transformers/all-nli", "triplet", split="dev")
 eval_stsb = load_dataset("sentence-transformers/stsb", split="validation")
 
-# Evaluator 1: For NLI triplets
+# Evaluator 1: For NLI triplets (measures triplet accuracy)
 nli_evaluator = TripletEvaluator(
     anchors=list(eval_nli["anchor"]),     
     positives=list(eval_nli["positive"]), 
@@ -207,20 +197,20 @@ nli_evaluator = TripletEvaluator(
     name="all-nli-dev",
 )
 
-# Evaluator 2: For STS benchmark
+# Evaluator 2: For STS benchmark (measures semantic similarity correlation)
 stsb_evaluator = EmbeddingSimilarityEvaluator(
     sentences1=list(eval_stsb["sentence1"]),
     sentences2=list(eval_stsb["sentence2"]),
     scores=list(eval_stsb["score"]),       
-    main_similarity=SimilarityFunction.COSINE,
+    main_similarity=SimilarityFunction.COSINE, # Use Cosine Similarity for STS
     name="sts-dev",
 )
 
-# Combine evaluators to run them sequentially
+# Combine evaluators to run them sequentially during evaluation steps
 evaluator = SequentialEvaluator([nli_evaluator, stsb_evaluator])
 
 
-# --- Step 6: Initialize and Start the Trainer ---
+# --- 6. Initialize and Start the Trainer ---
 # The trainer brings everything together and handles the training loop.
 logging.info("\nInitializing the SentenceTransformerTrainer...")
 trainer = SentenceTransformerTrainer(
@@ -236,16 +226,16 @@ trainer.train()
 logging.info("🏁🏁🏁 Pre-Training COMPLETE 🏁🏁🏁")
 
 
-# --- Step 7: Save the Final, Trained Model ---
+# --- 7. Save the Final, Trained Model ---
 # Since `load_best_model_at_end=True`, the trainer has already loaded the best
-# checkpoint. We just need to save it.
-final_model_path = Path(output_dir) / "final"
-model.save(str(final_model_path))
-logging.info(f"\n✅ Final model saved to: {final_model_path}")
+# checkpoint based on the validation metric. We just need to save this model.
+final_model_save_path = output_dir / "final_model"
+model.save(str(final_model_save_path))
+logging.info(f"\n✅ Final model saved to: {final_model_save_path}")
 
 
-
-# --- Step 8: Evaluate the model performance on the STS Benchmark test dataset ---
+# --- 8. Evaluate the model performance on the STS Benchmark test dataset ---
+# This provides an unbiased final performance metric.
 logging.info("\nEvaluating final model on STS Benchmark test dataset...")
 test_dataset_stsb = load_dataset("sentence-transformers/stsb", split="test")
 
@@ -258,5 +248,7 @@ test_evaluator = EmbeddingSimilarityEvaluator(
 )
 test_evaluator(model) # This will print the results to the console and logging
 
+# --- Script End ---
 END_TIME = datetime.datetime.now()
-logging.info(f"START: {START_TIME} | END: {END_TIME} | DURATION: {END_TIME - START_TIME}")
+logging.info(f"Script finished at: {END_TIME}")
+logging.info(f"Total duration: {END_TIME - START_TIME}")
