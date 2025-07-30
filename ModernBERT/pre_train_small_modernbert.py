@@ -116,11 +116,12 @@ logging.info("\nDefining multiple loss functions for each dataset type...")
 
 # Loss for triplet and pair datasets (contrastive learning)
 # Upgraded from MultipleNegativesRankingLoss for symmetric training and caching.
-mnsrl_loss = losses.CachedMultipleNegativesSymmetricRankingLoss(model)
+mnsrl_loss = losses.CachedMultipleNegativesSymmetricRankingLoss(model, mini_batch_size=64)
+mnrl_loss = losses.CachedMultipleNegativesRankingLoss(model, mini_batch_size=64)
 
 # Loss for STS dataset (regression task)
 # Upgraded from CosineSimilarityLoss for better calibrated similarity scores.
-cosent_loss = losses.CoSENTLoss(model)
+cosent_loss = losses.CoSENTLoss(model, )
 
 # Map each dataset key to its appropriate loss function.
 # Keys MUST match the keys in `train_dataset`.
@@ -128,14 +129,14 @@ cosent_loss = losses.CoSENTLoss(model)
 loss_functions = {
     "nli": mnsrl_loss,
     "quora": mnsrl_loss,
-    "natural_questions": mnsrl_loss,
+    "natural_questions": mnrl_loss,
     "stsb": cosent_loss, # STS is a regression task, CoSENTLoss is ideal
     "sentence_compression": mnsrl_loss, # (sentence_1, sentence_2) pairs
     "simple_wiki": mnsrl_loss, # Single sentences, MNSL will use in-batch negatives
     "altlex": mnsrl_loss, # (sentence1, sentence2) pairs
     "coco_captions": mnsrl_loss, # Single sentences, MNSL will use in-batch negatives
     "flickr30k_captions": mnsrl_loss, # Single sentences, MNSL will use in-batch negatives
-    "yahoo_answers": mnsrl_loss, # (title, question, answer) can be treated as pairs for MNSL
+    "yahoo_answers": mnrl_loss, # (title, question, answer) can be treated as pairs for MNSL
     "stack_exchange": mnsrl_loss, # (title1, title2) pairs
 }
 
@@ -148,10 +149,12 @@ args = SentenceTransformerTrainingArguments(
     output_dir=str(output_dir), # Required: Where to save checkpoints.
 
     # --- Key Training Parameters ---
-    num_train_epochs=1, # 1 epoch is a strong baseline for large, mixed datasets
-    per_device_train_batch_size=32, # Adjust based on your GPU's VRAM
+    num_train_epochs=3, # 1 epoch is a strong baseline for large, mixed datasets
+    per_device_train_batch_size=128, # Adjust based on your GPU's VRAM
     learning_rate=5e-4, # Higher learning rate for training from scratch (as per ModernBERT paper)
     warmup_ratio=0.05, # 5% of steps for learning rate warmup
+    weight_decay=0.01,
+    lr_scheduler_type="cosine",
     
     # Performance optimizations
     fp16=False, # Set to True if your GPU does not support bf16
