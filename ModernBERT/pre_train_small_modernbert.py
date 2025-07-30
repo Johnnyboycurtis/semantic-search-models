@@ -148,7 +148,7 @@ args = SentenceTransformerTrainingArguments(
     output_dir=str(output_dir), # Required: Where to save checkpoints.
 
     # --- Key Training Parameters ---
-    num_train_epochs=1, # 1 epoch is a strong baseline for large, mixed datasets
+    num_train_epochs=4, # 1 epoch is a strong baseline for large, mixed datasets
     per_device_train_batch_size=32, # Adjust based on your GPU's VRAM
     learning_rate=5e-4, # Higher learning rate for training from scratch (as per ModernBERT paper)
     warmup_ratio=0.05, # 5% of steps for learning rate warmup
