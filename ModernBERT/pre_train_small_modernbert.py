@@ -61,7 +61,7 @@ model = SentenceTransformer(
     model_card_data=SentenceTransformerModelCardData(
         language="en",
         license="apache-2.0",
-        model_name="ModernBERT-small for General Purpose Similarity",
+        model_name="ModernBERT-small-1.5 for General Purpose Similarity",
     ),
     model_kwargs={
         "torch_dtype": torch.bfloat16,
