@@ -1,45 +1,43 @@
 # ==============================================================================
-#           Improving a Model with In-Batch Negative Knowledge Distillation
+#           State-of-the-Art Fine-Tuning with Multi-Dataset Training
+#                         and NanoBEIR Benchmarking
 # ==============================================================================
 #
 # PURPOSE:
-# This script fine-tunes a student model using a powerful in-batch negative
-# training setup with MultipleNegativesRankingLoss. This is a form of distillation
-# where the student learns to produce a good embedding space for ranking, a skill
-# implicitly held by the teacher. Unlike the previous approach, this focuses
-# on creating a globally consistent embedding space rather than just replicating
-# teacher scores on isolated triplets.
+# This script fine-tunes a model using a modern multi-dataset strategy and
+# evaluates it against real-world information retrieval benchmarks during
+# training using the NanoBEIREvaluator. This provides the most accurate
+# picture of the model's performance on its end-goal task: retrieval.
 #
 # WHAT IT DOES:
-# 1.  Loads a strong foundational student model.
-# 2.  Loads multiple triplet/pair datasets (AllNLI, TriviaQA, MS MARCO).
-# 3.  Uses `MultipleNegativesRankingLoss` which leverages in-batch negatives for
-#     highly efficient and effective training. The explicit "negative" column
-#     from the dataset is used, but the primary source of negatives comes from
-#     other examples in the same batch.
-# 4.  Evaluates performance on STSb, NLI, MS MARCO, and a new Paraphrase Mining task.
+# 1.  Loads a pre-trained sentence-transformer model.
+# 2.  Loads multiple retrieval-focused datasets (MS MARCO, GooAQ, Natural Questions).
+# 3.  Organizes them into a dictionary for the trainer.
+# 4.  Uses MultipleNegativesRankingLoss for powerful in-batch negative training.
+# 5.  Sets up a round-robin batch sampler to ensure fair training across datasets.
+# 6.  Initializes the NanoBEIREvaluator to benchmark on MSMARCO and NQ.
+# 7.  Benchmarks the model *before* training to establish a baseline.
+# 8.  Trains the model, with NanoBEIR providing the primary evaluation metrics.
 #
 # ==============================================================================
 
-import logging
-from datetime import datetime
 import torch
-from datasets import load_dataset, concatenate_datasets
-
+import logging
+from pathlib import Path
+from datetime import datetime
 from sentence_transformers import (
-    LoggingHandler,
     SentenceTransformer,
-    losses,
-    evaluation,
+    SentenceTransformerTrainer,
+    SentenceTransformerTrainingArguments,
+    SentenceTransformerModelCardData,
+    LoggingHandler,
 )
-# --- CHANGE 1: Import the new evaluator ---
+from sentence_transformers import losses
+from sentence_transformers.training_args import MultiDatasetBatchSamplers
 from sentence_transformers.evaluation import (
-    EmbeddingSimilarityEvaluator,
-    TripletEvaluator,
-    ParaphraseMiningEvaluator, # Added this import
+    NanoBEIREvaluator,  # The new, powerful evaluator
 )
-from sentence_transformers.trainer import SentenceTransformerTrainer
-from sentence_transformers.training_args import SentenceTransformerTrainingArguments
+from datasets import load_dataset
 
 # --- Configuration ---
 logging.basicConfig(
@@ -49,168 +47,140 @@ logging.basicConfig(
     handlers=[LoggingHandler()],
 )
 
-# --- Step 1: Define Student Model ---
-# We no longer need the teacher model during this training script
-student_model_path = './ModernBERT-small/training-small-modernbert/final'
-output_dir = "ModernBERT-small/distilled-mnrl-ModernBERT-small"
+# Generate a unique timestamp for this run (RECOMMENDED FOR OUTPUT_DIR)
+RUN_TIMESTAMP = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
-# Training hyperparameters
-train_batch_size = 64 # MNRL benefits from larger batch sizes if VRAM allows
+# --- Step 1: Initialize the Model to be Fine-Tuned ---
+model_path = "./ModernBERT-small/training-run-2025-07-29_08-16-14/final_model"
+# CHANGE: Make output_dir dynamic for unique runs
+output_dir_base = Path("./ModernBERT-small/finetuned")
+output_dir = output_dir_base / f"run_{RUN_TIMESTAMP}"
+output_dir.mkdir(parents=True, exist_ok=True) # Ensure directory exists
 
-logging.info(f"Student model (initial): {student_model_path}")
+logging.info(f"Loading model to be fine-tuned from: {model_path}")
 
-# Load model with bfloat16 for performance gains on compatible hardware
-model_kwargs = {"torch_dtype": torch.bfloat16}
-student_model = SentenceTransformer(student_model_path, model_kwargs=model_kwargs)
-
-
-# --- Step 2: Load and Prepare Datasets ---
-# We use a triplet dataset, as MultipleNegativesRankingLoss can use it.
-# The primary benefit, however, comes from in-batch negatives.
-logging.info("Loading datasets...")
-
-# --- Dataset 1: AllNLI ---
-nli_dataset = load_dataset("sentence-transformers/all-nli", "triplet", split="train").select(range(20000))
-eval_dataset_nli = load_dataset("sentence-transformers/all-nli", "triplet", split="dev")
-
-# --- Dataset 2: TriviaQA ---
-trivia_qa_dataset = load_dataset("sentence-transformers/trivia-qa-triplet", "triplet", split="train").select(range(30000))
-
-# --- Dataset 3: MS MARCO ---
-msmarco_dataset = load_dataset("sentence-transformers/msmarco-msmarco-distilbert-base-v3", "triplet", split="train").select(range(100000))
-msmarco_dataset = msmarco_dataset.rename_column("query", "anchor")
-msmarco_splits = msmarco_dataset.train_test_split(test_size=5000, seed=42)
-msmarco_train_dataset = msmarco_splits["train"]
-eval_dataset_msmarco = msmarco_splits["test"]
-del msmarco_dataset
-
-# --- Concatenate Datasets ---
-train_dataset = concatenate_datasets([nli_dataset, trivia_qa_dataset, msmarco_train_dataset])
-train_dataset = train_dataset.shuffle(seed=7936)
-logging.info(f"Combined training dataset created with {len(train_dataset):,} examples.")
-
-
-# --- CHANGE 2: REMOVED a Major Step ---
-# --- Step 3: (REMOVED) Pre-compute Teacher Similarity Scores ---
-# We are switching to MultipleNegativesRankingLoss, which does not require
-# pre-computed teacher scores. It operates directly on the text pairs,
-# making the training setup much simpler and faster.
-logging.info("Skipping teacher score pre-computation. Using MultipleNegativesRankingLoss instead.")
-
-
-# --- Step 4: Set up Evaluators and Loss ---
-stsb_eval_dataset = load_dataset("sentence-transformers/stsb", split="validation")
-dev_evaluator_stsb = EmbeddingSimilarityEvaluator(
-    sentences1=stsb_eval_dataset["sentence1"],
-    sentences2=stsb_eval_dataset["sentence2"],
-    scores=stsb_eval_dataset["score"],
-    name="sts-dev"
+model = SentenceTransformer(
+    model_path,
+    model_card_data=SentenceTransformerModelCardData(
+        language="en",
+        license="apache-2.0",
+        model_name="ModernBERT-small-Retrieval-BEIR-Tuned",
+    ),
+    model_kwargs={
+        "torch_dtype": torch.bfloat16,
+        "attn_implementation": "flash_attention_2",
+        "device_map": "cuda"
+    }
 )
 
-dev_evaluator_nli = TripletEvaluator(
-    anchors=eval_dataset_nli["anchor"],
-    positives=eval_dataset_nli["positive"],
-    negatives=eval_dataset_nli["negative"],
-    name="all-nli-dev",
-)
 
-dev_evaluator_msmarco = TripletEvaluator(
-    anchors=eval_dataset_msmarco["anchor"],
-    positives=eval_dataset_msmarco["positive"],
-    negatives=eval_dataset_msmarco["negative"],
-    name="msmarco-dev",
-)
+# --- Step 2: Prepare the Datasets for Multi-Task Learning ---
+train_datasets = {}
 
-# --- CHANGE 3: ADDED Paraphrase Mining Evaluator ---
-logging.info("Adding Paraphrase Mining Evaluator on Quora Duplicates.")
-quora_eval_dataset = load_dataset("sentence-transformers/quora-duplicates", "pair", split="train").select(range(5000))
+logging.info("Loading MS MARCO dataset...")
+msmarco_dataset = load_dataset("sentence-transformers/msmarco-msmarco-distilbert-base-v3", "triplet-hard", split="train") #.select(range(1000))
+# REMOVED: print(msmarco_dataset) # Remove print statements for clean logs
+msmarco_dataset = msmarco_dataset.rename_columns({"query": "anchor", "positive": "positive", "negative": "negative"})
+train_datasets["msmarco"] = msmarco_dataset
 
+logging.info("Loading GooAQ dataset...")
+gooaq_dataset = load_dataset("sentence-transformers/gooaq", "pair", split="train") #.select(range(5000))
+# REMOVED: print(gooaq_dataset)
+gooaq_dataset = gooaq_dataset.rename_columns({"question": "anchor", "answer": "positive"})
+train_datasets["gooaq"] = gooaq_dataset
 
-sentences_map = {}
-duplicate_pairs = []
-for row in quora_eval_dataset:
-    # Get the texts from the 'anchor' and 'positive' columns
-    sentence1 = row['anchor']
-    sentence2 = row['positive']
-    
-    # Add sentences to the map if they aren't already there
-    # This logic is optional but can reduce the size of sentences_map
-    if sentence1 not in sentences_map.values():
-        s1_id = len(sentences_map)
-        sentences_map[s1_id] = sentence1
-    else:
-        # Find the existing ID
-        s1_id = list(sentences_map.keys())[list(sentences_map.values()).index(sentence1)]
+logging.info("Loading Natural Questions dataset...")
+nq_dataset = load_dataset("sentence-transformers/natural-questions", "pair", split="train") #.select(range(1000))
+# REMOVED: print(nq_dataset)
+nq_dataset = nq_dataset.rename_columns({"query": "anchor", "answer": "positive"})
+train_datasets["natural_questions"] = nq_dataset
 
-    if sentence2 not in sentences_map.values():
-        s2_id = len(sentences_map)
-        sentences_map[s2_id] = sentence2
-    else:
-        # Find the existing ID
-        s2_id = list(sentences_map.keys())[list(sentences_map.values()).index(sentence2)]
-        
-    # --- THIS IS THE KEY FIX ---
-    # Since every row in the "pair" dataset is a duplicate, we don't need to check a label.
-    # We simply add the pair of IDs to our list of duplicates.
-    duplicate_pairs.append((s1_id, s2_id))
-
-dev_evaluator_paraphrase = ParaphraseMiningEvaluator(
-    sentences_map,
-    duplicate_pairs,
-    name="quora-paraphrase-dev"
-)
-# --- END CHANGE 3 ---
+logging.info(f"SUCCESS: Loaded {len(train_datasets)} training datasets: {list(train_datasets.keys())}")
 
 
-evaluator = evaluation.SequentialEvaluator([
-    dev_evaluator_stsb,
-    dev_evaluator_nli,
-    dev_evaluator_msmarco,
-    dev_evaluator_paraphrase # Added to the sequence
-])
+# --- Step 3: Define the Loss Function ---
+logging.info("Defining the loss function: MultipleNegativesRankingLoss.")
+mnsrl_loss = losses.CachedMultipleNegativesSymmetricRankingLoss(model, mini_batch_size=64)
+mnrl_loss = losses.CachedMultipleNegativesRankingLoss(model, mini_batch_size=64)
+
+# Map each dataset key to its appropriate loss function.
+# Keys MUST match the keys in `train_datasets`.
+loss_functions = {
+    "msmarco": mnsrl_loss,
+    "gooaq": mnsrl_loss,
+    "natural_questions": mnrl_loss,
+}
+logging.info(f"Loss functions defined for datasets: {list(loss_functions.keys())}")
 
 
-# --- CHANGE 4: SWITCHED the Loss Function ---
-# Define the new, more powerful loss function
-train_loss = losses.MultipleNegativesRankingLoss(model=student_model)
-logging.info("Using MultipleNegativesRankingLoss for in-batch negative training.")
-# --- END CHANGE 4 ---
 
+# --- Step 4: Configure Training Arguments ---
+logging.info(f"Training arguments configured. Checkpoints will be saved to: {output_dir}")
 
-# --- Step 5: Configure and Run the Trainer ---
 args = SentenceTransformerTrainingArguments(
     output_dir=output_dir,
-    num_train_epochs=3, # MNRL is very data-efficient, 1-3 epochs is often enough
-    per_device_train_batch_size=train_batch_size,
-    per_device_eval_batch_size=train_batch_size,
-    warmup_ratio=0.1,
-    fp16=False,
-    bf16=True,
+    num_train_epochs=3,
+    per_device_train_batch_size=256,
+    multi_dataset_batch_sampler=MultiDatasetBatchSamplers.PROPORTIONAL, # PROPORTIONAL samples batches based on dataset size, ensuring larger datasets like MSMARCO contribute more training steps, which is often beneficial for retrieval fine-tuning.
     learning_rate=5e-5,
+    warmup_ratio=0.1,
+    weight_decay=0.01,
+    lr_scheduler_type="cosine",
+    bf16=True,
+    bf16_full_eval=True,
     eval_strategy="steps",
-    eval_steps=500,
+    eval_steps=6000, # Evaluate on BEIR less frequently, as it takes more time
     save_strategy="steps",
-    save_steps=500,
-    save_total_limit=4,
-    logging_steps=100,
-    metric_for_best_model="eval_msmarco-dev_cosine_accuracy",
+    save_steps=6000,
+    save_total_limit=6,
     load_best_model_at_end=True,
-    run_name="distill-mnrl-modernbert",
+    metric_for_best_model="eval_NanoBEIR_mean_cosine_ndcg@10",
+    logging_steps=1000,
+    run_name="modernbert-beir-finetune",
 )
 
+# The available evaluation metrics are: ['eval_NanoMSMARCO_cosine_accuracy@1', 'eval_NanoMSMARCO_cosine_accuracy@3', 'eval_NanoMSMARCO_cosine_accuracy@5', 'eval_NanoMSMARCO_cosine_accuracy@10', 'eval_NanoMSMARCO_cosine_precision@1', 'eval_NanoMSMARCO_cosine_precision@3', 'eval_NanoMSMARCO_cosine_precision@5', 'eval_NanoMSMARCO_cosine_precision@10', 'eval_NanoMSMARCO_cosine_recall@1', 'eval_NanoMSMARCO_cosine_recall@3', 'eval_NanoMSMARCO_cosine_recall@5', 'eval_NanoMSMARCO_cosine_recall@10', 'eval_NanoMSMARCO_cosine_ndcg@10', 'eval_NanoMSMARCO_cosine_mrr@10', 'eval_NanoMSMARCO_cosine_map@100', 'eval_NanoNQ_cosine_accuracy@1', 'eval_NanoNQ_cosine_accuracy@3', 'eval_NanoNQ_cosine_accuracy@5', 'eval_NanoNQ_cosine_accuracy@10', 'eval_NanoNQ_cosine_precision@1', 'eval_NanoNQ_cosine_precision@3', 'eval_NanoNQ_cosine_precision@5', 'eval_NanoNQ_cosine_precision@10', 'eval_NanoNQ_cosine_recall@1', 'eval_NanoNQ_cosine_recall@3', 'eval_NanoNQ_cosine_recall@5', 'eval_NanoNQ_cosine_recall@10', 'eval_NanoNQ_cosine_ndcg@10', 'eval_NanoNQ_cosine_mrr@10', 'eval_NanoNQ_cosine_map@100', 'eval_NanoHotpotQA_cosine_accuracy@1', 'eval_NanoHotpotQA_cosine_accuracy@3', 'eval_NanoHotpotQA_cosine_accuracy@5', 'eval_NanoHotpotQA_cosine_accuracy@10', 'eval_NanoHotpotQA_cosine_precision@1', 'eval_NanoHotpotQA_cosine_precision@3', 'eval_NanoHotpotQA_cosine_precision@5', 'eval_NanoHotpotQA_cosine_precision@10', 'eval_NanoHotpotQA_cosine_recall@1', 'eval_NanoHotpotQA_cosine_recall@3', 'eval_NanoHotpotQA_cosine_recall@5', 'eval_NanoHotpotQA_cosine_recall@10', 'eval_NanoHotpotQA_cosine_ndcg@10', 'eval_NanoHotpotQA_cosine_mrr@10', 'eval_NanoHotpotQA_cosine_map@100', 'eval_NanoBEIR_mean_cosine_accuracy@1', 'eval_NanoBEIR_mean_cosine_accuracy@3', 'eval_NanoBEIR_mean_cosine_accuracy@5', 'eval_NanoBEIR_mean_cosine_accuracy@10', 'eval_NanoBEIR_mean_cosine_precision@1', 'eval_NanoBEIR_mean_cosine_precision@3', 'eval_NanoBEIR_mean_cosine_precision@5', 'eval_NanoBEIR_mean_cosine_precision@10', 'eval_NanoBEIR_mean_cosine_recall@1', 'eval_NanoBEIR_mean_cosine_recall@3', 'eval_NanoBEIR_mean_cosine_recall@5', 'eval_NanoBEIR_mean_cosine_recall@10', 'eval_NanoBEIR_mean_cosine_ndcg@10', 'eval_NanoBEIR_mean_cosine_mrr@10', 'eval_NanoBEIR_mean_cosine_map@100', 'eval_runtime', 'eval_samples_per_second', 'eval_steps_per_second', 'epoch']
+
+# --- Step 5: Set Up the Evaluator ---
+logging.info("Setting up NanoBEIREvaluator for validation on MSMARCO and NQ...")
+beir_eval_datasets = ["MSMARCO", "NQ", "HotpotQA"]
+evaluator = NanoBEIREvaluator(dataset_names=beir_eval_datasets)
+
+# --- Benchmark the base model *before* training ---
+logging.info("--- Evaluating Base Model on BEIR (Before Training) ---")
+evaluator(model, output_path=f"{output_dir}/beir_results_before_training")
+logging.info("------------------------------------------------------")
+
+
+# --- Step 6: Initialize and Start the Trainer ---
+logging.info("Initializing the SentenceTransformerTrainer for multi-dataset training...")
 trainer = SentenceTransformerTrainer(
-    model=student_model,
+    model=model,
     args=args,
-    train_dataset=train_dataset,
+    train_dataset=train_datasets,
+    loss=loss_functions,
     evaluator=evaluator,
-    loss=train_loss,
 )
 
-logging.info("🚀🚀🚀 STARTING IN-BATCH NEGATIVE TRAINING (MNRL) 🚀🚀🚀")
-trainer.train()
-logging.info("🏁🏁🏁 TRAINING COMPLETE 🏁🏁🏁")
+print("\n" + "="*80)
+print("🚀🚀🚀 STARTING MULTI-DATASET & BEIR-EVALUATED FINE-TUNING 🚀🚀🚀")
+print("="*80 + "\n")
 
-# Save the final, best-performing model
-final_output_dir = f"{output_dir}/final"
-student_model.save(final_output_dir)
-logging.info(f"Final distilled model saved to: {final_output_dir}")
+trainer.train()
+
+print("\n" + "="*80)
+print("🏁🏁🏁 TRAINING COMPLETE 🏁🏁🏁")
+print("="*80 + "\n")
+
+# --- Step 7: Final Evaluation After Training ---
+logging.info("--- Evaluating Final Model on BEIR (After Training) ---")
+evaluator(model, output_path=f"{output_dir}/final")
+logging.info("-----------------------------------------------------")
+
+
+# --- Step 8: Save the Final, Trained Model ---
+final_model_path = output_dir / "final_model" # Changed to Path object for consistency
+logging.info(f"Saving the final, best-performing model to: {final_model_path}")
+model.save_pretrained(str(final_model_path)) # Ensure it's a string for save_pretrained
+
+print(f"\n✅ All done! Your BEIR-tuned model is ready at '{final_model_path}'.")
