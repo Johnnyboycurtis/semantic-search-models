@@ -38,14 +38,16 @@ from sentence_transformers.evaluation import (
     NanoBEIREvaluator,  # The new, powerful evaluator
 )
 from datasets import load_dataset
+from logging.handlers import RotatingFileHandler
 
 # --- Configuration ---
 logging.basicConfig(
     format="%(asctime)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     level=logging.INFO,
-    handlers=[LoggingHandler()],
+    handlers=[RotatingFileHandler(filename="fine_tuning.log")],
 )
+
 
 # --- Step 1: Initialize the Model to be Fine-Tuned ---
 model_path = "./ModernBERT-small/pre_trained/final_model"
@@ -103,9 +105,9 @@ mnrl_loss = losses.CachedMultipleNegativesRankingLoss(model, mini_batch_size=64)
 # Map each dataset key to its appropriate loss function.
 # Keys MUST match the keys in `train_datasets`.
 loss_functions = {
-    "msmarco": mnsrl_loss,
+    "msmarco": mnrl_loss,
     "gooaq": mnsrl_loss,
-    "natural_questions": mnrl_loss,
+    "natural_questions": mnsrl_loss,
 }
 logging.info(f"Loss functions defined for datasets: {list(loss_functions.keys())}")
 
@@ -116,7 +118,7 @@ logging.info(f"Training arguments configured. Checkpoints will be saved to: {out
 
 args = SentenceTransformerTrainingArguments(
     output_dir=output_dir,
-    num_train_epochs=3,
+    num_train_epochs=1,
     per_device_train_batch_size=256,
     multi_dataset_batch_sampler=MultiDatasetBatchSamplers.PROPORTIONAL, # PROPORTIONAL samples batches based on dataset size, ensuring larger datasets like MSMARCO contribute more training steps, which is often beneficial for retrieval fine-tuning.
     learning_rate=5e-5,
@@ -126,13 +128,13 @@ args = SentenceTransformerTrainingArguments(
     bf16=True,
     bf16_full_eval=True,
     eval_strategy="steps",
-    eval_steps=6000, # Evaluate on BEIR less frequently, as it takes more time
+    eval_steps=2000, # Evaluate on BEIR less frequently, as it takes more time
     save_strategy="steps",
-    save_steps=6000,
+    save_steps=2000,
     save_total_limit=6,
     load_best_model_at_end=True,
     metric_for_best_model="eval_NanoBEIR_mean_cosine_ndcg@10",
-    logging_steps=1000,
+    logging_steps=500,
     run_name="modernbert-beir-finetune",
 )
 
@@ -145,7 +147,7 @@ evaluator = NanoBEIREvaluator(dataset_names=beir_eval_datasets)
 
 # --- Benchmark the base model *before* training ---
 logging.info("--- Evaluating Base Model on BEIR (Before Training) ---")
-evaluator(model, output_path=f"{output_dir}/beir_results_before_training")
+evaluator(model)
 logging.info("------------------------------------------------------")
 
 
@@ -169,15 +171,15 @@ print("\n" + "="*80)
 print("🏁🏁🏁 TRAINING COMPLETE 🏁🏁🏁")
 print("="*80 + "\n")
 
-# --- Step 7: Final Evaluation After Training ---
-logging.info("--- Evaluating Final Model on BEIR (After Training) ---")
-evaluator(model, output_path=f"{output_dir}/final")
-logging.info("-----------------------------------------------------")
-
-
-# --- Step 8: Save the Final, Trained Model ---
+# --- Step 7: Save the Final, Trained Model ---
 final_model_path = output_dir / "final_model" # Changed to Path object for consistency
 logging.info(f"Saving the final, best-performing model to: {final_model_path}")
 model.save_pretrained(str(final_model_path)) # Ensure it's a string for save_pretrained
+
+# --- Step 8: Final Evaluation After Training ---
+logging.info("--- Evaluating Final Model on BEIR (After Training) ---")
+evaluator(model, output_path=f"{output_dir}/final_model")
+logging.info("-----------------------------------------------------")
+
 
 print(f"\n✅ All done! Your BEIR-tuned model is ready at '{final_model_path}'.")
