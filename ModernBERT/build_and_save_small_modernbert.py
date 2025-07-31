@@ -83,7 +83,7 @@ tokenizer = AutoTokenizer.from_pretrained("answerdotai/ModernBERT-base")
 
 # --- 4. Define Save Path and Create Directories ---
 # Here we set the specific subdirectory path you requested.
-save_directory = "./ModernBERT-small"
+save_directory = "./ModernBERT-small-1.5/blank_model"
 
 # os.makedirs() with exist_ok=True is the robust way to create directories.
 # It won't raise an error if the path already exists.

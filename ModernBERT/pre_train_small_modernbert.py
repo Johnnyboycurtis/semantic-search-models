@@ -44,7 +44,7 @@ START_TIME = datetime.datetime.now()
 logging.info(f"Script started at: {START_TIME}")
 
 # Define output directory for model checkpoints and logs
-OUTPUT_DIR_BASE = "ModernBERT-small"
+OUTPUT_DIR_BASE = "ModernBERT-small-1.5"
 RUN_TIMESTAMP = START_TIME.strftime('%Y-%m-%d_%H-%M-%S')
 output_dir = Path(OUTPUT_DIR_BASE) / f"pre-trained"
 output_dir.mkdir(parents=True, exist_ok=True) # Ensure directory exists
@@ -54,7 +54,7 @@ logging.info(f"Training outputs will be saved to: {output_dir}")
 # We load the blank ModernBERT architecture. The SentenceTransformer class
 # handles module creation (Transformer + Pooling) automatically.
 # We let the trainer handle device placement and performance optimizations.
-model_path = "./ModernBERT-small/blank_model"
+model_path = "./ModernBERT-small-1.5/blank_model"
 logging.info(f"Loading custom blank model architecture from: {model_path}")
 model = SentenceTransformer(
     model_path,

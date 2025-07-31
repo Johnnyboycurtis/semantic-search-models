@@ -50,9 +50,9 @@ logging.basicConfig(
 
 
 # --- Step 1: Initialize the Model to be Fine-Tuned ---
-model_path = "./ModernBERT-small/pre_trained/final_model"
+model_path = "./ModernBERT-small-1.5/pre_trained/final_model"
 # CHANGE: Make output_dir dynamic for unique runs
-output_dir_base = Path("./ModernBERT-small/finetuned")
+output_dir_base = Path("./ModernBERT-small-1.5/finetuned")
 output_dir = output_dir_base
 output_dir.mkdir(parents=True, exist_ok=True) # Ensure directory exists
 
