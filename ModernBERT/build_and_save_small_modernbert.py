@@ -1,26 +1,68 @@
-# build_and_save_small_modernbert.py
+# ==============================================================================
+#           Configuration for ModernBERT-small
+# ==============================================================================
+# This configuration defines a 'ModernBERT-small' model, which is a principled
+# downscaling of the 'ModernBERT-base' architecture from the original paper.
+# The design maintains key architectural ratios to ensure structural consistency
+# and performance, resulting in a smaller, faster, and more efficient model.
+# ==============================================================================
 
 import os
 from transformers import ModernBertConfig, ModernBertModel, AutoTokenizer
 
 # --- 1. Define the Small ModernBERT Architecture ---
-# This configuration creates a much smaller model than the ModernBERT-base.
-# We are reducing the key parameters that determine the model's size.
-print("Defining the small ModernBERT configuration...")
-small_modernbert_config = ModernBertConfig(
-    hidden_size=384,                 # A common dimension for small embedding models
-    num_hidden_layers=12,               # Significantly fewer layers than the base's 22
-    num_attention_heads=6,             # Must be a divisor of hidden_size
-    intermediate_size=1536,            # Typically 4 * hidden_size
-    max_position_embeddings=1024,       # Max sequence length for the model; originally 8192
+from transformers import ModernBertConfig
+
+# Design Rationale:
+# This configuration is a principled downscaling of the `ModernBERT-base` architecture.
+# It applies the inverse of the scaling rules observed when the authors scaled
+# from their `base` to `large` models. This ensures architectural consistency and
+# aims to create a smaller, more efficient model that retains the core design
+# philosophy of the ModernBERT family.
+
+modernbert_small_config = ModernBertConfig(
+    # --- Core Architectural Dimensions ---
+    
+    hidden_size=384,
+    # RATIONALE: A 2x reduction from the ModernBERT-base model's 768 hidden size,
+    # establishing a solid foundation for a "small" class model.
+
+    num_hidden_layers=6,
+    # RATIONALE: A significant reduction from the base model's 22 layers to create
+    # a fast, lightweight model with fewer parameters and lower inference latency.
+
+    num_attention_heads=6,
+    # RATIONALE: Derived to maintain a consistent attention head dimension of 64,
+    # which is crucial for model stability and performance.
+    # CALCULATION: hidden_size / 64 => 384 / 64 = 6.
+
+    # --- Feed-Forward Network (FFN) Configuration ---
+    
+    intermediate_size=576,
+    # RATIONALE: This value maintains the base model's 3.0x FFN expansion ratio,
+    # which is critical for the model's representational capacity. For a GeGLU
+    # activation, this total expansion is split across two parallel gating layers.
+    # CALCULATION: (hidden_size * 3.0) / 2 => (384 * 3.0) / 2 = 576.
+
+    hidden_activation="gelu",
+    # RATIONALE: The underlying ModernBERT model code uses this parameter to
+    # construct its internal GeGLU activation layer. This is the expected value
+    # as per the original model's implementation.
+
+    # --- Other Model Settings ---
+    
+    max_position_embeddings=1024,
+    # RATIONALE: A practical context length for a small, efficient encoder,
+    # balancing capability with memory and computational requirements.
 )
+
 
 # --- 2. Create the Blank Model ---
 # This initializes a new, blank ModernBERT model from our small configuration.
 # The model has the architecture we defined but has not been trained; its
 # weights are randomly initialized.
 print("Initializing blank ModernBERT model from the configuration...")
-model = ModernBertModel(small_modernbert_config)
+model = ModernBertModel(modernbert_small_config)
 
 # Inspect the model architecture.
 # Notice the 'score' head at the end, which is a linear layer for classification.
