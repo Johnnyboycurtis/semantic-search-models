@@ -47,14 +47,11 @@ logging.basicConfig(
     handlers=[LoggingHandler()],
 )
 
-# Generate a unique timestamp for this run (RECOMMENDED FOR OUTPUT_DIR)
-RUN_TIMESTAMP = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-
 # --- Step 1: Initialize the Model to be Fine-Tuned ---
-model_path = "./ModernBERT-small/training-run-2025-07-29_08-16-14/final_model"
+model_path = "./ModernBERT-small/pre_trained/final_model"
 # CHANGE: Make output_dir dynamic for unique runs
 output_dir_base = Path("./ModernBERT-small/finetuned")
-output_dir = output_dir_base / f"run_{RUN_TIMESTAMP}"
+output_dir = output_dir_base
 output_dir.mkdir(parents=True, exist_ok=True) # Ensure directory exists
 
 logging.info(f"Loading model to be fine-tuned from: {model_path}")
