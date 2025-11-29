@@ -1,14 +1,14 @@
 # ==============================================================================
-#           Benchmarking Models on BeIR/hotpotqa Dataset
+#           Benchmarking Multiple Models for Information Retrieval
 # ==============================================================================
 #
 # PURPOSE:
-# This script evaluates the performance of multiple sentence embedding models on
-# the HotpotQA information retrieval task from the BeIR benchmark.
+# This script (benchmark_ir.py) evaluates the performance of multiple sentence
+# embedding models on a standard Information Retrieval (IR) task.
 #
 # WHAT IT DOES:
 # 1.  Defines a dictionary of models to be benchmarked.
-# 2.  Loads and prepares the `BeIR/hotpotqa` dataset.
+# 2.  Loads and prepares the `BeIR/webis-touche2020` dataset.
 # 3.  Initializes the `InformationRetrievalEvaluator`.
 # 4.  Loops through each model, runs the evaluation, and stores the results.
 # 5.  Prints a clean, formatted summary table and saves results to a CSV file.
@@ -46,40 +46,31 @@ models_to_benchmark = {
 device = "cuda" if torch.cuda.is_available() else "cpu"
 logging.info(f"Using device: {device}")
 
-# --- Step 2: Load and Prepare the HotpotQA Dataset ---
-dataset_name = "BeIR/hotpotqa"
+# --- Step 2: Load and Prepare the Dataset ---
+dataset_name = "BeIR/webis-touche2020"
 logging.info(f"Loading dataset: {dataset_name}")
 
-# Load the corpus, queries, and relevance judgments (qrels)
-corpus_data = load_dataset(dataset_name, "corpus", split="corpus")
-queries_data = load_dataset(dataset_name, "queries", split="queries")
-relevant_docs_data = load_dataset("BeIR/hotpotqa-qrels", split="test")
+corpus_data = load_dataset("BeIR/webis-touche2020", "corpus", split="corpus")
+queries_data = load_dataset("BeIR/webis-touche2020", "queries", split="queries")
+relevant_docs_data = load_dataset("BeIR/webis-touche2020-qrels", split="test")
 
 # For this dataset, we want to concatenate the title and texts for the corpus
 logging.info("Preprocessing corpus by concatenating title and text.")
 corpus_data = corpus_data.map(lambda x: {'text': x['title'] + " " + x['text']}, remove_columns=['title'])
 
-
-# --- [NEW] Shrink the Corpus for Faster Evaluation ---
-# The full HotpotQA corpus is massive. For rapid, iterative benchmarking,
-# we create a smaller subset that is guaranteed to contain all the relevant
-# documents from the test set, plus a random sample of distractor documents.
-logging.info("Shrinking corpus for faster evaluation...")
-required_corpus_ids = set(relevant_docs_data["corpus-id"])
+# Shrink the corpus size heavily to only the relevant documents + 30,000 random documents
+logging.info("Shrinking corpus to relevant docs + 30,000 random docs.")
+required_corpus_ids = set(map(str, relevant_docs_data["corpus-id"]))
 if len(corpus_data) > 30000:
     all_corpus_ids = corpus_data["_id"]
-    # Create a pool of IDs that are not in the required set
     sample_pool = [cid for cid in all_corpus_ids if cid not in required_corpus_ids]
-    # Add 30,000 random documents as distractors
     k = min(30000, len(sample_pool))
     required_corpus_ids.update(random.sample(sample_pool, k=k))
 
 corpus_data = corpus_data.filter(lambda x: x["_id"] in required_corpus_ids)
 logging.info(f"Final shrunk corpus size: {len(corpus_data):,}")
 
-
-
-# Convert the datasets to dictionaries for the evaluator
+# Convert the datasets to dictionaries
 corpus = dict(zip(corpus_data["_id"], corpus_data["text"]))
 queries = dict(zip(queries_data["_id"], queries_data["text"]))
 relevant_docs = {}
@@ -90,12 +81,10 @@ for qrel in relevant_docs_data:
         relevant_docs[qid] = set()
     relevant_docs[qid].add(corpus_id)
 
-logging.info(f"Dataset loaded: {len(corpus):,} documents and {len(queries):,} queries.")
-
 
 # --- Step 3: Initialize the Evaluator ---
 logging.info("Initializing the InformationRetrievalEvaluator...")
-evaluator_name = "BeIR-hotpotqa-test"
+evaluator_name = "BeIR-touche2020-subset-test"
 ir_evaluator = InformationRetrievalEvaluator(
     queries=queries,
     corpus=corpus,
@@ -106,7 +95,7 @@ ir_evaluator = InformationRetrievalEvaluator(
 
 # --- Step 4: Run the Benchmark Loop ---
 print("\n" + "="*80)
-print(" 🚀 STARTING HOTPOTQA INFORMATION RETRIEVAL BENCHMARK 🚀")
+print(" 🚀 STARTING INFORMATION RETRIEVAL BENCHMARK 🚀")
 print("="*80 + "\n")
 
 all_results = []
@@ -154,7 +143,7 @@ print("="*80 + "\n")
 
 # Save results to a CSV file for tracking
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-csv_filename = f"hotpotqa_benchmark_results_{timestamp}.csv"
+csv_filename = f"ir_benchmark_results_{timestamp}.csv"
 if all_results:
     with open(csv_filename, 'w', newline='') as csvfile:
         fieldnames = all_results[0].keys()
