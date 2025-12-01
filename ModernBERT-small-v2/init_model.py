@@ -79,10 +79,11 @@ config = ModernBertConfig(
     attn_implementation="flash_attention_2", 
 )
 # Initialize the model with random weights based on the config
-hf_model = ModernBertModel(config)
+hf_model = ModernBertModel(config).to("cuda")
+print(hf_model)
 
 # Save this "skeleton" model to disk so SentenceTransformer can load it correctly
-custom_model_path = "./output/modernbert-small-init"
+custom_model_path = "./ModernBERT-small-2/modernbert-small-init"
 if os.path.exists(custom_model_path):
     shutil.rmtree(custom_model_path)
     
