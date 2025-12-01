@@ -106,8 +106,7 @@ inner_loss_symmetric = losses.CachedMultipleNegativesSymmetricRankingLoss(model,
 loss_symmetric = losses.MatryoshkaLoss(model, inner_loss_symmetric, matryoshka_dims=mrl_dims)
 
 # B. Asymmetric Loss (MSMARCO, NQ, GooAQ)
-inner_loss_asymmetric = losses.CachedMultipleNegativesRankingLoss(model, mini_batch_size=64)
-loss_asymmetric = losses.MatryoshkaLoss(model, inner_loss_asymmetric, matryoshka_dims=mrl_dims)
+loss_asymmetric = losses.CachedMultipleNegativesRankingLoss(model, mini_batch_size=64)
 
 loss_functions = {
     "nli": loss_symmetric,
@@ -126,7 +125,7 @@ args = SentenceTransformerTrainingArguments(
     
     # --- OPTIMIZATION FOR BLANK MODEL ---
     num_train_epochs=2,              # 2 Epochs is plenty given dataset size (Millions of rows)
-    learning_rate=1e-4,              # INCREASED: 1e-4 for training from scratch
+    learning_rate=3e-4,              # INCREASED: 1e-4 for training from scratch
     per_device_train_batch_size=256, # High batch size = better negatives
     warmup_ratio=0.1,                # 10% warmup to stabilize initial random gradients
     lr_scheduler_type="cosine",
