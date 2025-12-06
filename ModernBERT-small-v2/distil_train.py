@@ -5,7 +5,7 @@ This file contains an example how to make a SentenceTransformer model faster and
 import logging
 import traceback
 from datetime import datetime
-
+from pathlib import Path
 import pandas as pd
 import torch
 from datasets import Dataset, concatenate_datasets, load_dataset
@@ -40,10 +40,14 @@ teacher_model = SentenceTransformer(teacher_model_name,
     }
 )
 
-output_dir = "output/model-distillation-" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+# Output config
+OUTPUT_DIR_BASE = "ModernBERT-small-2"
+output_dir = Path(OUTPUT_DIR_BASE) / "distill"
+output_dir.mkdir(parents=True, exist_ok=True)
 
 # We will train a small model like TinyBERT to imitate the teacher.
-STAGE_1_PATH = "./ModernBERT-small-2/pre-trained/final_model"
+STAGE_1_PATH = "./ModernBERT-small-2/modernbert-small-init"
 logging.info(f"Loading Stage 1 Model from: {STAGE_1_PATH}")
 
 student_model = SentenceTransformer(
@@ -174,6 +178,7 @@ if student_model.get_sentence_embedding_dimension() < teacher_model.get_sentence
 
     logging.info(f"Teacher Performance with {teacher_model.get_sentence_embedding_dimension()} dimensions:")
     dev_evaluator_stsb(teacher_model)
+    teacher_model.save(f"./teacher_model/{teacher_model_name}")
 
 
 # Use the teacher model to get the gold embeddings
@@ -185,7 +190,7 @@ def map_embeddings(batch):
     }
 
 
-train_dataset = train_dataset.shuffle(123).select(range(1000000))
+train_dataset = train_dataset.shuffle(123).select(range(2000000))
 train_dataset = train_dataset.map(map_embeddings, batched=True, batch_size=50000)
 # Optionally, save the dataset to disk to speed up future runs
 train_dataset.save_to_disk("datasets/distillation_train_dataset")
@@ -210,14 +215,14 @@ args = SentenceTransformerTrainingArguments(
     warmup_ratio=0.1,
     fp16=False,  # Set to False if you get an error that your GPU can't run on FP16
     bf16=True,  # Set to True if you have a GPU that supports BF16
-    metric_for_best_model="eval_sts-dev_spearman_cosine",
+    metric_for_best_model="eval_NanoBEIR_mean_cosine_ndcg@10",
     load_best_model_at_end=True,
     learning_rate=1e-4,
     # Optional tracking/debugging parameters:
     eval_strategy="steps",
-    eval_steps=1000,
+    eval_steps=2000,
     save_strategy="steps",
-    save_steps=1000,
+    save_steps=2000,
     save_total_limit=4,
     logging_steps=100,
     run_name="distillation-layer-reduction",
@@ -232,7 +237,6 @@ trainer = SentenceTransformerTrainer(
     loss=train_loss,
     evaluator=dev_evaluator,
 )
-trainer.train()
 
 # Evaluate the model performance on the STS Benchmark test dataset
 test_evaluator = EmbeddingSimilarityEvaluator(
