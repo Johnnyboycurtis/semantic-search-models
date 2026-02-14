@@ -1,7 +1,6 @@
 import os
 import torch
 import math
-from datetime import datetime
 from datasets import load_dataset
 from transformers import (
     AutoTokenizer,
@@ -11,39 +10,40 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from transformers.trainer_utils import get_last_checkpoint
 
-# 1. ENVIRONMENT SETUP
 set_seed(42)
 
-# PATHS: Ensure this points to the OUTPUT_PATH from your initialization script
 INIT_MODEL_PATH = "./modernbert-small-init"
 TRAIN_FILE = "data/combined_mlm_dataset.parquet"
 OUTPUT_DIR = "./modernbert-small-mlm"
 
-
 def run_pretraining():
-    # 2. LOAD GUIDE-INITIALIZED MODEL
-    print(f"--- Loading GUIDE-Initialized Backbone from {INIT_MODEL_PATH} ---")
+    # 1. FIND THE ACTUAL LAST CHECKPOINT
+    last_checkpoint = None
+    if os.path.isdir(OUTPUT_DIR):
+        last_checkpoint = get_last_checkpoint(OUTPUT_DIR)
+        if last_checkpoint:
+            print(f"--- Found Actual Last Checkpoint: {last_checkpoint} ---")
 
-    # We load via AutoModelForMaskedLM.
-    # It will load the GUIDE weights for the backbone and randomly
-    # initialize the LM head and layers 1-11.
+    # 2. LOAD MODEL
+    # On T4, we MUST load in float16 if we intend to use fp16=True to avoid the Scaler error.
+    print(f"--- Loading Model for Resumption ---")
     model = AutoModelForMaskedLM.from_pretrained(
-        INIT_MODEL_PATH,
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16,  # Maintaining F32 for stability
-        attn_implementation="sdpa",  # for pre-training in F32
-        # attn_implementation="flash_attention_2" # Enabled for speed
+        last_checkpoint if last_checkpoint else INIT_MODEL_PATH,
+        dtype=torch.float32, # For stability; training done in f16
+        attn_implementation="sdpa", 
     )
+    
+    # Ensure weights are tied (fixes the 'decoder.weight' missing warning)
+    model.tie_weights()
 
-    # Move to GPU immediately to avoid CPU-based attention errors
     if torch.cuda.is_available():
         model = model.to("cuda")
-        print("Model moved to CUDA.")
 
     tokenizer = AutoTokenizer.from_pretrained(INIT_MODEL_PATH)
 
-    # 3. DATASET PREPARATION (Sentence-Transformers Paragraph Format)
+    # 3. DATASET
     print("--- Preparing Dataset ---")
     dataset = load_dataset("parquet", data_files={"train": TRAIN_FILE})
 
@@ -51,46 +51,37 @@ def run_pretraining():
         return tokenizer(
             examples["text"],
             truncation=True,
-            max_length=512 * 2,
+            max_length=1024, # Match your 512*2 setting
             return_special_tokens_mask=True,
-            return_token_type_ids=False,  # Strict ModernBERT requirement
+            return_token_type_ids=False,
         )
 
     tokenized_datasets = dataset["train"].map(
         tokenize_function, batched=True, remove_columns=["text"], num_proc=4
     )
 
-    # 4. COLLATOR (The 30% ModernBERT "Golden Rule")
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer, mlm=True, mlm_probability=0.30
     )
 
-    # 5. TRAINING ARGUMENTS (Optimized for 384-dim Student)
+    # 4. TRAINING ARGUMENTS
+    # We update save_steps to 2500 to match the checkpoint state
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
-        # overwrite_output_dir=True,
-        num_train_epochs=6,
-        # T4 COMPATIBILITY LEVER 1: Standard Mixed Precision
-        fp16=True,  # For T4 GPU
-        bf16=False,  # For RTX GPU
-        # T4 COMPATIBILITY LEVER 2: Memory Management
+        num_train_epochs=3,
+        fp16=True, 
         per_device_train_batch_size=16,
-        gradient_accumulation_steps=4,  # Effective Batch Size = 128
-        gradient_checkpointing=True,  # Save VRAM
-        # T4 COMPATIBILITY LEVER 3: Stability over speed
-        torch_compile=False,
-        # Optimizer & Schedule
+        gradient_accumulation_steps=2, 
+        gradient_checkpointing=True,
         learning_rate=5e-4,
         lr_scheduler_type="cosine",
-        warmup_steps=1000,  # Reduced warmup because Layer 0/Embeddings are already aligned
+        warmup_steps=1000,
         weight_decay=0.01,
-        # Monitoring
         logging_steps=50,
-        save_steps=2000,
+        save_steps=2500, # Matched to checkpoint
         save_total_limit=4,
     )
 
-    # 6. INITIALIZE TRAINER
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -98,32 +89,15 @@ def run_pretraining():
         data_collator=data_collator,
     )
 
-    # 7. CHECK FOR CHECKPOINT
-    resume_from_checkpoint = None
-    if os.path.isdir(OUTPUT_DIR):
-        # Check if there are any "checkpoint-XXXX" folders inside
-        checkpoints = [d for d in os.listdir(OUTPUT_DIR) if d.startswith("checkpoint-")]
-        if checkpoints:
-            resume_from_checkpoint = "last-checkpoint"
-            print(f"--- Found existing checkpoints in {OUTPUT_DIR}. Resuming... ---")
+    # 5. EXECUTION
+    print("--- Resuming Student Pre-training ---")
+    # Using the automatically detected last_checkpoint
+    train_result = trainer.train()
 
-    # 8. EXECUTION
-    print("--- Starting Student Pre-training ---")
-    train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    # 6. SAVE
 
-    # 9. SAVE FINAL BACKBONE
-    trainer.save_model(OUTPUT_DIR)
-    tokenizer.save_pretrained(OUTPUT_DIR)
-
-    metrics = train_result.metrics
-    perplexity = math.exp(metrics["train_loss"])
-    print(f"Final Student Train Perplexity: {perplexity:.2f}")
-
-    # Perplexity Metric
-    metrics = train_result.metrics
-    perplexity = math.exp(metrics["train_loss"])
-    print(f"Final Student Train Perplexity: {perplexity:.2f}")
-
+    trainer.save_model(f"{OUTPUT_DIR}/final")
+    tokenizer.save_pretrained(f"{OUTPUT_DIR}/final")
 
 if __name__ == "__main__":
     run_pretraining()
