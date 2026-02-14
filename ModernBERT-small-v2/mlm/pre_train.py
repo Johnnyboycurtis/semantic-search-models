@@ -18,7 +18,7 @@ set_seed(42)
 # PATHS: Ensure this points to the OUTPUT_PATH from your initialization script
 INIT_MODEL_PATH = "./modernbert-small-init"
 TRAIN_FILE = "data/combined_mlm_dataset.parquet"
-OUTPUT_DIR = f"./pre-trained-mlm"
+OUTPUT_DIR = "./modernbert-small-mlm"
 
 
 def run_pretraining():
@@ -71,8 +71,8 @@ def run_pretraining():
         # overwrite_output_dir=True,
         num_train_epochs=6,
         # T4 COMPATIBILITY LEVER 1: Standard Mixed Precision
-        fp16=True, # For T4 GPU
-        bf16=False, # For RTX GPU
+        fp16=True,  # For T4 GPU
+        bf16=False,  # For RTX GPU
         # T4 COMPATIBILITY LEVER 2: Memory Management
         per_device_train_batch_size=16,
         gradient_accumulation_steps=4,  # Effective Batch Size = 128
@@ -98,13 +98,26 @@ def run_pretraining():
         data_collator=data_collator,
     )
 
-    # 7. EXECUTION
-    print("--- Starting Student Pre-training ---")
-    train_result = trainer.train()
+    # 7. CHECK FOR CHECKPOINT
+    resume_from_checkpoint = None
+    if os.path.isdir(OUTPUT_DIR):
+        # Check if there are any "checkpoint-XXXX" folders inside
+        checkpoints = [d for d in os.listdir(OUTPUT_DIR) if d.startswith("checkpoint-")]
+        if checkpoints:
+            resume_from_checkpoint = "last-checkpoint"
+            print(f"--- Found existing checkpoints in {OUTPUT_DIR}. Resuming... ---")
 
-    # 8. SAVE FINAL BACKBONE
+    # 8. EXECUTION
+    print("--- Starting Student Pre-training ---")
+    train_result = trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+
+    # 9. SAVE FINAL BACKBONE
     trainer.save_model(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
+
+    metrics = train_result.metrics
+    perplexity = math.exp(metrics["train_loss"])
+    print(f"Final Student Train Perplexity: {perplexity:.2f}")
 
     # Perplexity Metric
     metrics = train_result.metrics
