@@ -24,13 +24,16 @@ def process_datasets():
 
     # --- DATASET 2: Stanford Encyclopedia of Philosophy ---
     print("\n🚀 Loading Stanford Philosophy...")
-    phil_ds = load_dataset("johnnyboycurtis/stanford_encyclopedia_of_philosophy")[
-        "train"
-    ]
+    phil_ds = load_dataset("johnnyboycurtis/Philosophical-Triplets-Retrieval")["train"]
 
     def flatten_phil(batch):
         # Combines the entry titles and the contents into a flat list
-        return {"text": batch["entry"] + batch["contents"]}
+        return {
+            "text": batch["query"]
+            + batch["positive"]
+            + batch["negative"]
+            + batch["text_chunk"]
+        }
 
     print("Mapping Philosophy Dataset...")
     phil_flat = phil_ds.map(

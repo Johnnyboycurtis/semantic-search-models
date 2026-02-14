@@ -51,7 +51,7 @@ def run_pretraining():
         return tokenizer(
             examples["text"],
             truncation=True,
-            max_length=512,
+            max_length=512 * 2,
             return_special_tokens_mask=True,
             return_token_type_ids=False,  # Strict ModernBERT requirement
         )
@@ -68,31 +68,25 @@ def run_pretraining():
     # 5. TRAINING ARGUMENTS (Optimized for 384-dim Student)
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
-        overwrite_output_dir=True,
-        num_train_epochs=1,
-        
-        # SPEED LEVER 1: Precision (The RTX 50-series special)
-        # BF16 is the "Golden Middle" for speed and stability.
-        bf16=True,
-        fp16=False,
-        
-        # SPEED LEVER 2: Maximize VRAM Utilization
-        # We crank this up because 16GB is huge for a 384-dim model.
-        per_device_train_batch_size=64,  # Was 16
-        gradient_accumulation_steps=1,  # Was 2
+        # overwrite_output_dir=True,
+        num_train_epochs=6,
+        # T4 COMPATIBILITY LEVER 1: Standard Mixed Precision
+        fp16=True, # For T4 GPU
+        bf16=False, # For RTX GPU
+        # T4 COMPATIBILITY LEVER 2: Memory Management
+        per_device_train_batch_size=16,
+        gradient_accumulation_steps=4,  # Effective Batch Size = 128
+        gradient_checkpointing=True,  # Save VRAM
+        # T4 COMPATIBILITY LEVER 3: Stability over speed
+        torch_compile=False,
         # Optimizer & Schedule
-        learning_rate=8e-4,
+        learning_rate=5e-4,
         lr_scheduler_type="cosine",
         warmup_steps=1000,  # Reduced warmup because Layer 0/Embeddings are already aligned
         weight_decay=0.01,
-
-        # SPEED LEVER 3: Stop re-calculating (Turn off checkpointing)
-        gradient_checkpointing=False,
-        # Compilation (Keep it, it's worth it after step 50)
-        torch_compile=True,
         # Monitoring
         logging_steps=50,
-        save_steps=2500,
+        save_steps=2000,
         save_total_limit=4,
     )
 
