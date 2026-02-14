@@ -41,9 +41,43 @@ def process_datasets():
     )
     phil_flat.to_parquet("data/johnnyboycurtis_philosophy.parquet")
 
+
+
+
+    # 1. Load the dataset
+    print("\n🚀 Loading NPR...")
+    npr_ds = load_dataset("sentence-transformers/npr")["train"]
+
+    # 2. Define the mapping function
+    def npr_concatenate_title_and_body(example):
+        """
+        Concatenates the 'title' and 'body' fields into a new 'text' field
+        following the specified format.
+        """
+        title = example['title']
+        body = example['body']
+        
+        # Create the desired output format
+        output_str = f"# {title} \n\n {body}"
+        
+        # Return the example dictionary with the new field
+        return {"text": output_str}
+
+    # 3. Apply the map function
+    # We use batched=False (the default) because we are processing one example at a time.
+    # We also use remove_columns to clean up the dataset and keep only the new 'text' column.
+    print("Mapping NPR Dataset...")
+    npr_flat = npr_ds.map(
+        npr_concatenate_title_and_body,
+        remove_columns=npr_ds.column_names,
+        #batched=True
+    )
+    npr_flat.to_parquet("data/npr_paragraphs.parquet")
+
     print("\n✅ Success! Files created:")
     print(f"- data/msmarco_triplets.parquet ({len(ms_flat)} rows)")
     print(f"- data/johnnyboycurtis_philosophy.parquet ({len(phil_flat)} rows)")
+    print(f"- data/npr.parquet ({len(npr_flat)} rows)")
 
 
 # In your training script:
@@ -55,15 +89,18 @@ def load_and_combine_data():
     phil_ds = load_dataset(
         "parquet", data_files={"train": "data/johnnyboycurtis_philosophy.parquet"}
     )["train"]
+    npr_ds = load_dataset(
+        "parquet", data_files={"train": "data/npr_paragraphs.parquet"}
+    )["train"]
 
     # Concatenate them for a unified training run
     from datasets import concatenate_datasets
 
-    combined_dataset = concatenate_datasets([ms_ds, phil_ds])
+    combined_dataset = concatenate_datasets([ms_ds, phil_ds, npr_ds])
 
     # Shuffle to ensure the model alternates between 'Search' style and 'Academic' style text
     output_file_name = "data/combined_mlm_dataset.parquet"
-    combined_dataset = combined_dataset.shuffle(seed=42)
+    combined_dataset = combined_dataset.shuffle(seed=123)
     combined_dataset.to_parquet(output_file_name)
     print(f"Saved combined dataset: {output_file_name}")
 
