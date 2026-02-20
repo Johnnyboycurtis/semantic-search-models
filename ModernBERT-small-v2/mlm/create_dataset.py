@@ -1,5 +1,5 @@
 import os
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 
 # 1. SETUP
 os.makedirs("data", exist_ok=True)
@@ -42,9 +42,7 @@ def process_datasets():
     phil_flat.to_parquet("data/johnnyboycurtis_philosophy.parquet")
 
 
-
-
-    # 1. Load the dataset
+    # --- DATASET 3: NPR ---
     print("\n🚀 Loading NPR...")
     npr_ds = load_dataset("sentence-transformers/npr")["train"]
 
@@ -70,19 +68,40 @@ def process_datasets():
     npr_flat = npr_ds.map(
         npr_concatenate_title_and_body,
         remove_columns=npr_ds.column_names,
-        #batched=True
+        # batched=True not possible here
     )
     npr_flat.to_parquet("data/npr_paragraphs.parquet")
+
+    # --- DATASET 4: FineWiki (NEW) ---
+    print("\n🚀 Loading FineWiki (English)...")
+    fw_ds = load_dataset("HuggingFaceFW/finewiki", "en")["train"]
+
+    def map_finewiki(example):
+        # The dataset already has a 'text' column, we just ensure compatibility
+        return {"text": example["text"]}
+
+    print("Mapping FineWiki Dataset (Selecting 'text' column)...")
+    # We explicitly remove all other columns to ensure consistency
+    fw_flat = fw_ds.map(
+        map_finewiki, 
+        remove_columns=fw_ds.column_names,
+        batched=True
+    )
+    fw_flat.to_parquet("data/finewiki_en.parquet")
+
 
     print("\n✅ Success! Files created:")
     print(f"- data/msmarco_triplets.parquet ({len(ms_flat)} rows)")
     print(f"- data/johnnyboycurtis_philosophy.parquet ({len(phil_flat)} rows)")
-    print(f"- data/npr.parquet ({len(npr_flat)} rows)")
+    print(f"- data/npr_paragraphs.parquet ({len(npr_flat)} rows)")
+    print(f"- data/finewiki_en.parquet ({len(fw_flat)} rows)")
 
 
 # In your training script:
 def load_and_combine_data():
-    # Load both local parquets
+    print("\n--- Combining Datasets ---")
+    
+    # Load all local parquets
     ms_ds = load_dataset(
         "parquet", data_files={"train": "data/msmarco_triplets.parquet"}
     )["train"]
@@ -92,12 +111,17 @@ def load_and_combine_data():
     npr_ds = load_dataset(
         "parquet", data_files={"train": "data/npr_paragraphs.parquet"}
     )["train"]
+    
+    # Load the new FineWiki dataset
+    fw_ds = load_dataset(
+        "parquet", data_files={"train": "data/finewiki_en.parquet"}
+    )["train"]
 
     # Concatenate them for a unified training run
-    from datasets import concatenate_datasets
+    combined_dataset = concatenate_datasets([ms_ds, phil_ds, npr_ds, fw_ds])
 
-    combined_dataset = concatenate_datasets([ms_ds, phil_ds, npr_ds])
-
+    print(f"Total combined dataset size: {len(combined_dataset)} rows")
+    
     # Shuffle to ensure the model alternates between 'Search' style and 'Academic' style text
     output_file_name = "data/combined_mlm_dataset.parquet"
     combined_dataset = combined_dataset.shuffle(seed=123)

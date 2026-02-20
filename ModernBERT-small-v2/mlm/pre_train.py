@@ -18,6 +18,7 @@ INIT_MODEL_PATH = "./modernbert-small-init"
 TRAIN_FILE = "data/combined_mlm_dataset.parquet"
 OUTPUT_DIR = "./modernbert-small-mlm"
 
+
 def run_pretraining():
     # 1. FIND THE ACTUAL LAST CHECKPOINT
     last_checkpoint = None
@@ -31,10 +32,10 @@ def run_pretraining():
     print(f"--- Loading Model for Resumption ---")
     model = AutoModelForMaskedLM.from_pretrained(
         last_checkpoint if last_checkpoint else INIT_MODEL_PATH,
-        dtype=torch.float32, # For stability; training done in f16
-        attn_implementation="sdpa", 
+        dtype=torch.float32,  # For stability; training done in f16
+        attn_implementation="sdpa",
     )
-    
+
     # Ensure weights are tied (fixes the 'decoder.weight' missing warning)
     model.tie_weights()
 
@@ -51,7 +52,7 @@ def run_pretraining():
         return tokenizer(
             examples["text"],
             truncation=True,
-            max_length=1024, # Match your 512*2 setting
+            max_length=1024,  # Match your 512*2 setting
             return_special_tokens_mask=True,
             return_token_type_ids=False,
         )
@@ -69,16 +70,16 @@ def run_pretraining():
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
         num_train_epochs=3,
-        fp16=True, 
+        fp16=True,
         per_device_train_batch_size=16,
-        gradient_accumulation_steps=2, 
+        gradient_accumulation_steps=2,
         gradient_checkpointing=True,
         learning_rate=5e-4,
         lr_scheduler_type="cosine",
         warmup_steps=1000,
         weight_decay=0.01,
         logging_steps=50,
-        save_steps=2500, # Matched to checkpoint
+        save_steps=2500,  # Matched to checkpoint
         save_total_limit=4,
     )
 
@@ -98,6 +99,7 @@ def run_pretraining():
 
     trainer.save_model(f"{OUTPUT_DIR}/final")
     tokenizer.save_pretrained(f"{OUTPUT_DIR}/final")
+
 
 if __name__ == "__main__":
     run_pretraining()
