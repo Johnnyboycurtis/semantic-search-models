@@ -13,13 +13,15 @@ class ParasailClient:
 
     BASE_URL = "https://api.parasail.io/v1/chat/completions"
 
-    def __init__(self, api_key: Optional[str] = None, retries: Optional[int] = None):
+    def __init__(self, api_key: Optional[str] = None, model_name: str = "allenai/Olmo-3-7B-Instruct", retries: Optional[int] = None, system_instructions: Optional[str] = None):
         """
         Initializes the client, loads the API key, and sets up the session.
         """
         self.api_key = api_key or os.getenv("PARASAIL_API_KEY")
-        self.MAX_RETRIES = 0 or retries
+        self.MAX_RETRIES = 1 or None
         self.RETRY_DELAY_SECONDS = 0.5
+        self.SYSTEM_INSTRUCTIONS = system_instructions
+        self.model_name = model_name
 
         if not self.api_key:
             raise ValueError(
@@ -59,9 +61,11 @@ class ParasailClient:
         Returns:
             The JSON response data from the API.
         """
-        payload = {"model": model, "messages": [{"role": "user", "content": prompt}]}
-
-        print(f"Sending request to: {self.BASE_URL}")
+        messages = []
+        if self.SYSTEM_INSTRUCTIONS:
+            messages = [{"role": "system", "content": self.SYSTEM_INSTRUCTIONS}]
+        messages.append({"role": "user", "content": prompt})
+        payload = {"model": self.model_name, "messages": messages}
 
         # --- RETRY LOGIC START ---
         for attempt in range(1, self.MAX_RETRIES + 1):
@@ -121,16 +125,52 @@ class ParasailClient:
 # For testing purposes, we simulate setting it here:
 os.environ["PARASAIL_API_KEY"] = "YOUR_SECRET_KEY_HERE_12345"
 
-if __name__ == "__main__":
+def demo(api_key):
 
     user_prompt = "What is the capital of New York?"
-    model_name = "google/gemma-3-27b-it"
+    model_name = "allenai/Olmo-3-7B-Instruct"
+
+    instructions = """# SYSTEM INSTRUCTIONS: QUERY GENERATOR
+    Your task is to generate 1-3 search queries given a body of text. 
+    The search queries should be contextually relevant to the body of text.
+    The search queries should be what a human would generate (i.e. simple search messages)
+    *   Only generate queries when there is significant contextual and semantic knowledge.
+    *   If context in the body of text is minimal, you can return an empty list `[]`.
+
+    ## OUTPUT FORMAT
+    ```json
+    [
+        "query one based on text A",
+        "query two focused on detail B",
+        "a final, broader query C"
+    ]
+    ```
+    """
+    blob = """### TEXT:
+The domestic rabbit (Oryctolagus cuniculus domesticus) is the domesticated form of the European rabbit. There are hundreds of rabbit breeds originating from all over the world. Rabbits were first domesticated and used for food and fur by the Romans. Rabbits may be housed inside, but the idea of the domestic rabbit as a house companion, a so-called house rabbit (similar to a house cat), was only strongly promoted starting with publications in the 1980s. Rabbits can be trained to use a litter box and taught to come when called, but require exercise and can damage a house or injure themselves if it has not been suitably prepared, based on their innate need to chew. Accidental interactions between pet rabbits and wild rabbits, while seemingly harmless, have been strongly discouraged due to the species' different temperaments as well as wild rabbits potentially carrying diseases.
+
+Unwanted pet rabbits sometimes end up in animal shelters, especially after the Easter season. In 2017, they were the United States' third most abandoned pet. Some of them go on to be adopted and become family pets in various forms. Because their wild counterparts have become invasive in Australia, pet rabbits are banned in the state of Queensland. Domestic rabbits bred for generations under human supervision to be docile will be less able to care or fend for themselves, if they are abandoned or escape from captivity.
+"""
+    blob = """### TEXT:
+    ## Project Goals
+
+*   [ ] Release initial versions of a general-purpose sentence embedding model.
+*   [ ] Release an accompanying cross-encoder reranking model.
+*   [ ] Publish the training scripts and configurations for all released models.
+*   [ ] Add performance benchmarks on common information retrieval tasks.
+
+## License
+
+Distributed under the MIT License.
+"""
+
+    user_prompt = blob
 
     print(f"Query: '{user_prompt}' using model: {model_name}\n")
 
     # Initialize the client and use it as a context manager (recommended)
     try:
-        with ParasailClient() as client:
+        with ParasailClient(api_key=api_key, system_instructions=instructions, model_name=model_name) as client:
             # Call the function
             api_response = client.generate_completion(
                 prompt=user_prompt, model=model_name
