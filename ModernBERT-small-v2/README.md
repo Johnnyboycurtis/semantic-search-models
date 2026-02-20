@@ -1,7 +1,3 @@
-This updated README reflects the specific technical pipeline used in your scripts: **Deep & Narrow Architecture**, **GUIDE Structural Initialization**, **MLM Pre-training**, and **Teacher-Student MSE Distillation**.
-
----
-
 # ModernBERT-small-v2: Deep & Narrow Embedding Model
 
 ModernBERT-small-v2 is a high-efficiency, 384-dimensional embedding model built using a rigorous four-stage pipeline. By combining structural weight transfer (GUIDE) with dense knowledge distillation, this model achieves the performance of much larger transformers while maintaining a minimal memory footprint and high storage efficiency.
