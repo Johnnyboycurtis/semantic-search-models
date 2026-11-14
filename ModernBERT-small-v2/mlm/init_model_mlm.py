@@ -1,181 +1,263 @@
-import logging
 import os
 import shutil
-import torch
-import numpy as np
-from sklearn.decomposition import PCA
-from transformers import ModernBertConfig, ModernBertModel, AutoTokenizer, AutoModel
-from sentence_transformers import SentenceTransformer
 
-# 1. Setup Logging
-logging.basicConfig(
-    format="%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S", level=logging.INFO
+import numpy as np
+import torch
+from sentence_transformers import SentenceTransformer
+from sklearn.decomposition import PCA
+from transformers import (
+    AutoModel,
+    AutoTokenizer,
+    ModernBertConfig,
+    ModernBertForMaskedLM,
+    ModernBertModel,
 )
-logger = logging.getLogger(__name__)
 
 # ==========================================
 # PART 1: Configuration
 # ==========================================
 
-TEACHER_ID = "answerdotai/ModernBERT-base"
-OUTPUT_PATH = "./modernbert-small-init"
+TEACHER_ID = "Alibaba-NLP/gte-modernbert-base"
+OUTPUT_PATH = "./models/base-model"
 
-# Your Custom "Deep & Narrow" Config
-student_config = ModernBertConfig(
-    # Keeping this at 384 ensures your vector storage costs remain identical.
-    hidden_size=384,
-    # --- DEPTH (Doubled) ---
-    # We move from 6 layers to 12.
-    # This matches the depth of standard DistilBERT/MiniLM models, allowing
-    # for significantly more complex semantic reasoning (multi-hop logic).
-    num_hidden_layers=12,
-    # --- HEADS (Unchanged) ---
-    # 384 / 64 = 6. This must stay 6 to preserve the 64-dim head size.
-    num_attention_heads=6,
-    # --- FFN CAPACITY (Principled Increase) ---
-    # In your previous Small model, you used intermediate_size=576.
-    # While mathematically valid for GeGLU (1.5x * 2 = 3.0x total),
-    # it is very thin for a 12-layer model.
-    #
-    # Standard BERT/ModernBERT scaling usually targets a 4.0x total expansion.
-    # Calculation:
-    #   Target Expansion: 384 * 4.0 = 1536 total units.
-    #   GeGLU Split: 1536 / 2 = 768.
-    #
-    # We set this to 768 or 1152.
-    # 1152 preserves the *exact* ratio of the Base model (Base is 1152 for 768 input).
-    # Since we are 384 input (half of base), 1152 is actually a massive 6x expansion (3x split).
-    #
-    # RECOMMENDATION: 768.
-    # This gives you a 4.0x total expansion (standard for deep models),
-    # ensuring the deeper layers have enough "memory" without bloating compute.
-    intermediate_size=768,
-    # --- Standard ModernBERT Settings ---
-    hidden_activation="gelu",
-    max_position_embeddings=1024,  # Keep 1024 or bump to 2048 if your RAG chunks are larger
-    vocab_size=50368,  # Ensure this matches your tokenizer
-    # Critical for training stability on deeper models
-    attn_implementation="flash_attention_2",
-)
+# Map each of the 12 student layers to a corresponding layer in the 22-layer teacher.
+# Both ModernBERT-base and our student use global_attn_every_n_layers=3, so teacher
+# layers 0, 6, 12 use global attention while intermediate layers use local sliding-window
+# attention. This mapping aligns global/local roles across depths:
+#   Student global layers (0, 3, 6, 9) <- Teacher layers (0, 6, 12, 19)
+#   Student local layers               <- Teacher local layers
+LAYER_MAP = [0, 1, 2, 6, 7, 8, 12, 13, 14, 19, 20, 21]
+
+
+def build_student_config(vocab_size: int, pad_token_id: int) -> ModernBertConfig:
+    """Build the custom 'Deep & Narrow' 12-layer, 384-dim ModernBERT student config."""
+    return ModernBertConfig(
+        # Keeping this at 384 ensures your vector storage costs remain identical.
+        hidden_size=384,
+        # --- DEPTH (Doubled) ---
+        # We move from 6 layers to 12.
+        # This matches the depth of standard DistilBERT/MiniLM models, allowing
+        # for significantly more complex semantic reasoning (multi-hop logic).
+        num_hidden_layers=12,
+        # --- HEADS (Unchanged) ---
+        # 384 / 64 = 6. This must stay 6 to preserve the 64-dim head size.
+        num_attention_heads=6,
+        # --- FFN CAPACITY (Principled Increase) ---
+        # In your previous Small model, you used intermediate_size=576.
+        # While mathematically valid for GeGLU (1.5x * 2 = 3.0x total),
+        # it is very thin for a 12-layer model.
+        #
+        # Standard BERT/ModernBERT scaling usually targets a 4.0x total expansion.
+        # Calculation:
+        #   Target Expansion: 384 * 4.0 = 1536 total units.
+        #   GeGLU Split: 1536 / 2 = 768.
+        #
+        # We set this to 768 or 1152.
+        # 1152 preserves the *exact* ratio of the Base model (Base is 1152 for 768 input).
+        # Since we are 384 input (half of base), 1152 is actually a massive 6x expansion (3x split).
+        #
+        # RECOMMENDATION: 768.
+        # This gives you a 4.0x total expansion (standard for deep models),
+        # ensuring the deeper layers have enough "memory" without bloating compute.
+        intermediate_size=768,
+        # --- Standard ModernBERT Settings ---
+        hidden_activation="gelu",
+        max_position_embeddings=1024,  # Keep 1024 or bump to 2048 if your RAG chunks are larger
+        vocab_size=vocab_size,
+        pad_token_id=pad_token_id,
+        # Note: attn_implementation="flash_attention_2" is intentionally omitted here;
+        # it is a model-loading argument passed at training time with bfloat16.
+    )
+
+
+def _copy_weight(param: torch.nn.Parameter, array: np.ndarray) -> None:
+    """Copy a NumPy weight array into a PyTorch Parameter in-place with matching dtype."""
+    with torch.no_grad():
+        param.copy_(torch.from_numpy(array).to(device=param.device, dtype=param.dtype))
+
 
 # ==========================================
 # PART 2: GUIDE Initialization
 # ==========================================
 
 
-def initialize_with_guide():
-    logger.info(f"Loading Teacher ({TEACHER_ID}) for GUIDE initialization...")
+def project_layer(
+    t_layer: torch.nn.Module,
+    s_layer: torch.nn.Module,
+    M: np.ndarray,
+    t_num_heads: int,
+    s_num_heads: int,
+) -> None:
+    """Project a single teacher ModernBERT layer into a student layer using basis M."""
+    t_hidden, s_hidden = M.shape
+    head_dim = s_hidden // s_num_heads
+    assert (
+        t_hidden // t_num_heads == head_dim
+    ), f"Head dim mismatch: teacher {t_hidden // t_num_heads} vs student {head_dim}"
+
+    # ---------------------------------------------------------
+    # 1. Attention Inputs (Wqkv) & Output (Wo)
+    # Teacher: Wqkv [2304, 768], Wo [768, 768]
+    # Student: Wqkv [1152, 384], Wo [384, 384]
+    # ---------------------------------------------------------
+    t_wqkv = t_layer.attn.Wqkv.weight.detach().numpy()
+    t_wo = t_layer.attn.Wo.weight.detach().numpy()
+
+    assert t_wqkv.shape == (
+        3 * t_hidden,
+        t_hidden,
+    ), f"Unexpected Wqkv shape: {t_wqkv.shape}"
+    assert t_wo.shape == (t_hidden, t_hidden), f"Unexpected Wo shape: {t_wo.shape}"
+
+    # Project input space of Wqkv (768 -> 384) and output space of Wo (768 -> 384)
+    t_wqkv_proj = np.dot(t_wqkv, M)  # [3 * t_hidden, s_hidden]
+    t_wo_proj = np.dot(M.T, t_wo)  # [s_hidden, t_hidden]
+
+    # Split Q, K, V blocks and reshape into per-head slices: [t_num_heads, head_dim, s_hidden]
+    t_q, t_k, t_v = np.split(t_wqkv_proj, 3, axis=0)
+    assert t_q.shape == (t_hidden, s_hidden)
+
+    t_q_heads = t_q.reshape(t_num_heads, head_dim, s_hidden)
+    t_k_heads = t_k.reshape(t_num_heads, head_dim, s_hidden)
+    t_v_heads = t_v.reshape(t_num_heads, head_dim, s_hidden)
+    t_wo_heads = t_wo_proj.reshape(s_hidden, t_num_heads, head_dim)
+
+    # Rank teacher heads by joint L2 norm (Q/K/V + Wo) and keep top-k in original order
+    head_scores = np.sqrt(
+        np.sum(t_q_heads**2, axis=(1, 2))
+        + np.sum(t_k_heads**2, axis=(1, 2))
+        + np.sum(t_v_heads**2, axis=(1, 2))
+        + np.sum(t_wo_heads**2, axis=(0, 2))
+    )
+    top_heads = np.sort(np.argsort(head_scores)[-s_num_heads:])
+
+    s_q = t_q_heads[top_heads].reshape(s_num_heads * head_dim, s_hidden)
+    s_k = t_k_heads[top_heads].reshape(s_num_heads * head_dim, s_hidden)
+    s_v = t_v_heads[top_heads].reshape(s_num_heads * head_dim, s_hidden)
+
+    s_wqkv_final = np.concatenate([s_q, s_k, s_v], axis=0)  # [1152, 384]
+    s_wo_final = t_wo_heads[:, top_heads, :].reshape(
+        s_hidden, s_num_heads * head_dim
+    )  # [384, 384]
+
+    assert s_wqkv_final.shape == tuple(s_layer.attn.Wqkv.weight.shape)
+    assert s_wo_final.shape == tuple(s_layer.attn.Wo.weight.shape)
+
+    _copy_weight(s_layer.attn.Wqkv.weight, s_wqkv_final)
+    _copy_weight(s_layer.attn.Wo.weight, s_wo_final)
+
+    # ---------------------------------------------------------
+    # 2. MLP Input (Wi) & Output (Wo) - GeGLU Handling
+    # Teacher: Wi [2304, 768] (1152 Gate + 1152 Value), Wo [768, 1152]
+    # Student: Wi [1536, 384] (768 Gate + 768 Value),   Wo [384, 768]
+    # ---------------------------------------------------------
+    t_wi = t_layer.mlp.Wi.weight.detach().numpy()
+    t_mlp_wo = t_layer.mlp.Wo.weight.detach().numpy()
+
+    t_inter = t_mlp_wo.shape[1]
+    s_inter = s_layer.mlp.Wo.weight.shape[1]
+
+    assert t_wi.shape == (2 * t_inter, t_hidden), f"Unexpected Wi shape: {t_wi.shape}"
+    assert t_mlp_wo.shape == (
+        t_hidden,
+        t_inter,
+    ), f"Unexpected MLP Wo shape: {t_mlp_wo.shape}"
+
+    # Project input space of Wi (768 -> 384) and output space of MLP Wo (768 -> 384)
+    t_wi_proj = np.dot(t_wi, M)  # [2 * t_inter, s_hidden]
+    t_mlp_wo_proj = np.dot(M.T, t_mlp_wo)  # [s_hidden, t_inter]
+
+    # Split Gate/Value blocks to keep paired GeGLU neurons aligned
+    t_wi_gate, t_wi_val = np.split(t_wi_proj, 2, axis=0)
+    assert t_wi_gate.shape == (t_inter, s_hidden)
+    assert t_wi_val.shape == (t_inter, s_hidden)
+
+    # Rank GeGLU neurons by joint L2 norm (Wi gate/value + Wo column) and keep top-k in order
+    neuron_scores = np.sqrt(
+        np.sum(t_wi_gate**2, axis=1)
+        + np.sum(t_wi_val**2, axis=1)
+        + np.sum(t_mlp_wo_proj**2, axis=0)
+    )
+    top_neurons = np.sort(np.argsort(neuron_scores)[-s_inter:])
+
+    s_wi_gate = t_wi_gate[top_neurons, :]
+    s_wi_val = t_wi_val[top_neurons, :]
+    s_wi_final = np.concatenate([s_wi_gate, s_wi_val], axis=0)  # [1536, 384]
+    s_mlp_wo_final = t_mlp_wo_proj[:, top_neurons]  # [384, 768]
+
+    assert s_wi_final.shape == tuple(s_layer.mlp.Wi.weight.shape)
+    assert s_mlp_wo_final.shape == tuple(s_layer.mlp.Wo.weight.shape)
+
+    _copy_weight(s_layer.mlp.Wi.weight, s_wi_final)
+    _copy_weight(s_layer.mlp.Wo.weight, s_mlp_wo_final)
+
+
+def initialize_with_guide() -> ModernBertModel:
+    print(f"Loading Teacher ({TEACHER_ID}) for GUIDE initialization...")
     teacher = AutoModel.from_pretrained(
         TEACHER_ID, trust_remote_code=True, torch_dtype=torch.float32
     )
 
-    logger.info("Initializing Blank Student...")
+    student_config = build_student_config(
+        vocab_size=teacher.config.vocab_size,
+        pad_token_id=teacher.config.pad_token_id,
+    )
+    assert len(LAYER_MAP) == student_config.num_hidden_layers
+
+    print("Initializing Blank Student...")
     student = ModernBertModel(student_config).to(dtype=torch.float32)
 
-    # --- Step A: Compress Embeddings (PCA) ---
-    logger.info("GUIDE Step A: Compressing Embeddings (768 -> 384)...")
+    # --- Step A: Compress Embeddings via Uncentered Subspace Projection ---
+    print("GUIDE Step A: Compressing Embeddings (768 -> 384)...")
 
     E_T = teacher.embeddings.tok_embeddings.weight.detach().numpy()
 
-    pca = PCA(n_components=student_config.hidden_size)
-    E_S_numpy = pca.fit_transform(E_T)
+    # Use svd_solver="full" for 100% deterministic decomposition (avoids randomized SVD).
+    pca = PCA(n_components=student_config.hidden_size, svd_solver="full")
+    pca.fit(E_T)
+    print(
+        f"PCA explained variance ratio sum: {pca.explained_variance_ratio_.sum():.4f}"
+    )
 
-    # Projection Matrix M: [768, 384]
+    # Projection Matrix M: [768, 384].
+    # Project via E_T @ M (uncentered) rather than pca.fit_transform(E_T) so embeddings
+    # and downstream linear weight projections (W @ M, M.T @ W) share the exact same subspace
+    # without introducing a -pca.mean_ @ M shift.
     M = pca.components_.T
+    E_S_numpy = np.dot(E_T, M)
 
-    student.embeddings.tok_embeddings.weight.data = torch.tensor(E_S_numpy)
-    logger.info("✅ Embeddings initialized via PCA.")
+    _copy_weight(student.embeddings.tok_embeddings.weight, E_S_numpy)
 
-    # --- Step B: Project Layer 0 ---
-    logger.info("GUIDE Step B: Projecting Layer 0 Weights...")
+    # Safeguard: ensure [PAD] token embedding remains strictly zero.
+    with torch.no_grad():
+        student.embeddings.tok_embeddings.weight[teacher.config.pad_token_id].zero_()
+    print("Embeddings initialized via uncentered PCA projection.")
 
-    t_layer0 = teacher.layers[0]
-    s_layer0 = student.layers[0]
+    # --- Step B: Project All 12 Student Layers ---
+    print(
+        f"GUIDE Step B: Projecting all {student_config.num_hidden_layers} layers "
+        f"using teacher mapping {LAYER_MAP}..."
+    )
+    for s_idx, t_idx in enumerate(LAYER_MAP):
+        project_layer(
+            teacher.layers[t_idx],
+            student.layers[s_idx],
+            M,
+            t_num_heads=teacher.config.num_attention_heads,
+            s_num_heads=student_config.num_attention_heads,
+        )
 
-    # ---------------------------------------------------------
-    # 1. Attention Inputs (Wqkv)
-    # Teacher: [2304, 768] -> Student: [1152, 384]
-    # ---------------------------------------------------------
-    t_wqkv = t_layer0.attn.Wqkv.weight.detach().numpy()
-
-    # Project Input (768->384)
-    t_wqkv_proj = np.dot(t_wqkv, M)
-
-    # Slice Output: Must handle Q, K, V blocks correctly
-    # Teacher (12 heads): Q(768) | K(768) | V(768)
-    # Student (6 heads):  Q(384) | K(384) | V(384)
-
-    t_q, t_k, t_v = np.split(t_wqkv_proj, 3, axis=0)  # Each is [768, 384]
-
-    # Slice each to keep only 6 heads (6 * 64 = 384 rows)
-    s_q = t_q[:384, :]
-    s_k = t_k[:384, :]
-    s_v = t_v[:384, :]
-
-    # Stack back together
-    s_wqkv_final = np.concatenate([s_q, s_k, s_v], axis=0)  # [1152, 384]
-    s_layer0.attn.Wqkv.weight.data = torch.tensor(s_wqkv_final)
-
-    # ---------------------------------------------------------
-    # 2. Attention Output (Wo)
-    # Teacher: [768, 768] -> Student: [384, 384]
-    # ---------------------------------------------------------
-    t_wo = t_layer0.attn.Wo.weight.detach().numpy()
-
-    # Slice Input columns (must match the 384 head outputs we kept above)
-    t_wo_sliced = t_wo[:, :384]
-
-    # Project Output rows (768 -> 384)
-    s_wo_final = np.dot(t_wo_sliced.T, M).T
-    s_layer0.attn.Wo.weight.data = torch.tensor(s_wo_final)
-
-    # ---------------------------------------------------------
-    # 3. MLP Input (Wi) - GeGLU Handling
-    # Teacher: [2304, 768] -> Student: [1536, 384]
-    # ---------------------------------------------------------
-    t_wi = t_layer0.mlp.Wi.weight.detach().numpy()
-
-    # Project Input (768 -> 384)
-    t_wi_proj = np.dot(t_wi, M)
-
-    # Slice Output: Must handle Gate/Value blocks correctly
-    # Teacher Intermediate: 1152. Wi Output: 2304 (1152 Gate + 1152 Value)
-    # Student Intermediate: 768.  Wi Output: 1536 (768 Gate + 768 Value)
-
-    t_wi_gate, t_wi_val = np.split(t_wi_proj, 2, axis=0)  # Each is [1152, 384]
-
-    # Keep first 768 neurons of Gate and Value
-    s_wi_gate = t_wi_gate[:768, :]
-    s_wi_val = t_wi_val[:768, :]
-
-    s_wi_final = np.concatenate([s_wi_gate, s_wi_val], axis=0)  # [1536, 384]
-    s_layer0.mlp.Wi.weight.data = torch.tensor(s_wi_final)
-
-    # ---------------------------------------------------------
-    # 4. MLP Output (Wo)
-    # Teacher: [768, 1152] -> Student: [384, 768]
-    # ---------------------------------------------------------
-    t_mlp_wo = t_layer0.mlp.Wo.weight.detach().numpy()
-
-    # Slice Input columns: Must match the 768 neurons we kept above
-    # Teacher Input: 1152. Student Input: 768.
-    t_mlp_wo_sliced = t_mlp_wo[:, :768]  # [768, 768]
-
-    # Project Output rows (768 -> 384)
-    s_mlp_wo_final = np.dot(t_mlp_wo_sliced.T, M).T  # [384, 768]
-
-    s_layer0.mlp.Wo.weight.data = torch.tensor(s_mlp_wo_final)
-
-    logger.info("✅ Layer 0 initialized via Projection + Slicing.")
+    print("All 12 layers initialized via Projection + Norm-Ranked Slicing.")
 
     return student
 
 
 # ==========================================
-# PART 3: Save and Wrap
+# PART 3: Save and Verify
 # ==========================================
 
-if __name__ == "__main__":
+
+def main() -> None:
     if os.path.exists(OUTPUT_PATH):
         shutil.rmtree(OUTPUT_PATH)
 
@@ -183,18 +265,52 @@ if __name__ == "__main__":
     hf_model = initialize_with_guide()
 
     # Save Model
-    logger.info(f"Saving initialized model to {OUTPUT_PATH}...")
+    print(f"Saving initialized model to {OUTPUT_PATH}...")
     hf_model.save_pretrained(OUTPUT_PATH)
 
     # Save Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(TEACHER_ID)
     tokenizer.save_pretrained(OUTPUT_PATH)
 
-    # Verify loading
-    logger.info("Verifying load as SentenceTransformer...")
+    # Verify loading for Phase 1 (MLM Pre-training)
+    print("Verifying load as ModernBertForMaskedLM (tie_word_embeddings=False)...")
+    mlm_model = ModernBertForMaskedLM.from_pretrained(
+        OUTPUT_PATH, tie_word_embeddings=False, torch_dtype=torch.float32
+    )
+    mlm_model.eval()
+    sample_inputs = tokenizer(
+        "The quick brown fox jumps over the lazy dog.", return_tensors="pt"
+    )
+    with torch.no_grad():
+        outputs = mlm_model(**sample_inputs, labels=sample_inputs["input_ids"])
 
-    # Force float32 loading to avoid flash attention mismatch during verification
-    model = SentenceTransformer(
+    seq_len = sample_inputs["input_ids"].shape[1]
+    expected_shape = (1, seq_len, mlm_model.config.vocab_size)
+    assert (
+        outputs.logits.shape == expected_shape
+    ), f"Expected logits shape {expected_shape}, got {outputs.logits.shape}"
+    assert torch.isfinite(
+        outputs.loss
+    ), "MLM dummy forward pass produced non-finite loss."
+    assert torch.isfinite(
+        outputs.logits
+    ).all(), "MLM dummy forward pass produced non-finite logits."
+    print(
+        f"MLM verification passed (logits={tuple(outputs.logits.shape)}, loss={outputs.loss.item():.4f})."
+    )
+
+    # Verify loading for Phase 2/3 (Contrastive Fine-tuning)
+    print("Verifying load as SentenceTransformer...")
+    # Force float32 loading during CPU/offline verification
+    st_model = SentenceTransformer(
         OUTPUT_PATH, model_kwargs={"torch_dtype": torch.float32}
     )
-    logger.info("Success! Model is ready for pre-training.")
+    emb = st_model.encode("The quick brown fox jumps over the lazy dog.")
+    assert emb.shape == (
+        st_model[0].auto_model.config.hidden_size,
+    ), f"Unexpected SentenceTransformer embedding shape: {emb.shape}"
+    print("Success! Model is ready for pre-training.")
+
+
+if __name__ == "__main__":
+    main()
