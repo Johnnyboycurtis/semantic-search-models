@@ -14,7 +14,7 @@ def process_datasets():
 
     def flatten_triplets(batch):
         # Concatenates all three columns into one long list of strings
-        return {"text": batch["query"] + batch["positive"] + batch["negative"]}
+        return {"text": batch["query"] + " : " + batch["positive"]}
 
     print("Mapping MS MARCO (Tripling row count for MLM)...")
     ms_flat = ms_ds.map(
@@ -41,7 +41,6 @@ def process_datasets():
     )
     phil_flat.to_parquet("data/johnnyboycurtis_philosophy.parquet")
 
-
     # --- DATASET 3: NPR ---
     print("\n🚀 Loading NPR...")
     npr_ds = load_dataset("sentence-transformers/npr")["train"]
@@ -52,12 +51,12 @@ def process_datasets():
         Concatenates the 'title' and 'body' fields into a new 'text' field
         following the specified format.
         """
-        title = example['title']
-        body = example['body']
-        
+        title = example["title"]
+        body = example["body"]
+
         # Create the desired output format
         output_str = f"# {title} \n\n {body}"
-        
+
         # Return the example dictionary with the new field
         return {"text": output_str}
 
@@ -72,35 +71,30 @@ def process_datasets():
     )
     npr_flat.to_parquet("data/npr_paragraphs.parquet")
 
-    # --- DATASET 4: FineWiki (NEW) ---
-    print("\n🚀 Loading FineWiki (English)...")
-    fw_ds = load_dataset("HuggingFaceFW/finewiki", "en")["train"]
+    # --- DATASET 4: Wiki40B (English) ---
+    print("\n🚀 Loading Wiki40B (English)...")
+    wiki_ds = load_dataset("google/wiki40b", "en")["train"]
 
-    def map_finewiki(example):
+    def map_wiki40b(example):
         # The dataset already has a 'text' column, we just ensure compatibility
         return {"text": example["text"]}
 
-    print("Mapping FineWiki Dataset (Selecting 'text' column)...")
+    print("Mapping Wiki40B Dataset (Selecting 'text' column)...")
     # We explicitly remove all other columns to ensure consistency
-    fw_flat = fw_ds.map(
-        map_finewiki, 
-        remove_columns=fw_ds.column_names,
-        batched=True
-    )
-    fw_flat.to_parquet("data/finewiki_en.parquet")
-
+    wiki_flat = wiki_ds.map(map_wiki40b, remove_columns=wiki_ds.column_names, batched=True)
+    wiki_flat.to_parquet("data/wiki40b_en.parquet")
 
     print("\n✅ Success! Files created:")
     print(f"- data/msmarco_triplets.parquet ({len(ms_flat)} rows)")
     print(f"- data/johnnyboycurtis_philosophy.parquet ({len(phil_flat)} rows)")
     print(f"- data/npr_paragraphs.parquet ({len(npr_flat)} rows)")
-    print(f"- data/finewiki_en.parquet ({len(fw_flat)} rows)")
+    print(f"- data/wiki40b_en.parquet ({len(wiki_flat)} rows)")
 
 
 # In your training script:
 def load_and_combine_data():
     print("\n--- Combining Datasets ---")
-    
+
     # Load all local parquets
     ms_ds = load_dataset(
         "parquet", data_files={"train": "data/msmarco_triplets.parquet"}
@@ -111,17 +105,17 @@ def load_and_combine_data():
     npr_ds = load_dataset(
         "parquet", data_files={"train": "data/npr_paragraphs.parquet"}
     )["train"]
-    
-    # Load the new FineWiki dataset
-    fw_ds = load_dataset(
-        "parquet", data_files={"train": "data/finewiki_en.parquet"}
-    )["train"]
+
+    # Load the Wiki40B dataset
+    wiki_ds = load_dataset("parquet", data_files={"train": "data/wiki40b_en.parquet"})[
+        "train"
+    ]
 
     # Concatenate them for a unified training run
-    combined_dataset = concatenate_datasets([ms_ds, phil_ds, npr_ds, fw_ds])
+    combined_dataset = concatenate_datasets([ms_ds, phil_ds, npr_ds, wiki_ds])
 
     print(f"Total combined dataset size: {len(combined_dataset)} rows")
-    
+
     # Shuffle to ensure the model alternates between 'Search' style and 'Academic' style text
     output_file_name = "data/combined_mlm_dataset.parquet"
     combined_dataset = combined_dataset.shuffle(seed=123)
