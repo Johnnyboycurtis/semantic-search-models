@@ -1,3 +1,12 @@
+"""
+Phase 1A: MLM Pre-training at 1,024-token context length.
+
+Trains the GUIDE-initialized student (./models/base-model) on the full dataset
+with frozen tok_embeddings and saves the checkpoint to ./modernbert-small-mlm/final.
+If downstream chunks exceed 1,024 tokens, optionally run pre_train_phase1b_optional.py
+after this script completes.
+"""
+
 import os
 import torch
 from datasets import load_dataset
@@ -66,7 +75,7 @@ def run_pretraining():
         )
 
     tokenized_datasets = dataset["train"].map(
-        tokenize_function, batched=True, remove_columns=["text"], num_proc=4
+        tokenize_function, batched=True, remove_columns=["text"], num_proc=6
     )
 
     data_collator = DataCollatorForLanguageModeling(
@@ -76,10 +85,11 @@ def run_pretraining():
     # 4. TRAINING ARGUMENTS
     training_args = TrainingArguments(
         output_dir=OUTPUT_DIR,
-        num_train_epochs=3,
-        fp16=True,
-        per_device_train_batch_size=16,
-        gradient_accumulation_steps=2,
+        num_train_epochs=2,
+        fp16=False,
+        bf16=True,
+        per_device_train_batch_size=8,
+        gradient_accumulation_steps=4,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={
             "use_reentrant": False
@@ -91,6 +101,7 @@ def run_pretraining():
         logging_steps=50,
         save_steps=2500,
         save_total_limit=4,
+        dataloader_num_workers=4,
     )
 
     trainer = Trainer(
