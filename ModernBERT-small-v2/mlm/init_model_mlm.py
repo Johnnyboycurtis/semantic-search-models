@@ -192,7 +192,7 @@ def project_layer(
     _copy_weight(s_layer.mlp.Wo.weight, s_mlp_wo_final)
 
 
-def initialize_with_guide(DATASET_FILE_PATH: str = "/content/drive/MyDrive/data/combined_mlm_dataset.parquet") -> ModernBertModel:
+def initialize_with_guide(DATASET_FILE_PATH: str) -> ModernBertModel:
     print(f"Loading Teacher ({TEACHER_ID}) for GUIDE initialization...")
     teacher = AutoModel.from_pretrained(
         TEACHER_ID, trust_remote_code=True, torch_dtype=torch.float32
