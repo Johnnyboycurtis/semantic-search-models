@@ -192,7 +192,7 @@ def project_layer(
     _copy_weight(s_layer.mlp.Wo.weight, s_mlp_wo_final)
 
 
-def initialize_with_guide() -> ModernBertModel:
+def initialize_with_guide(DATASET_FILE_PATH: str = "/content/drive/MyDrive/data/combined_mlm_dataset.parquet") -> ModernBertModel:
     print(f"Loading Teacher ({TEACHER_ID}) for GUIDE initialization...")
     teacher = AutoModel.from_pretrained(
         TEACHER_ID, trust_remote_code=True, torch_dtype=torch.float32
@@ -208,15 +208,13 @@ def initialize_with_guide() -> ModernBertModel:
     student = ModernBertModel(student_config).to(dtype=torch.float32)
 
     # --- Step A: Compress Embeddings via Frequency-Weighted Exact SVD ---
-    print(
-        "GUIDE Step A: Compressing Embeddings (768 -> 384) via Frequency-Weighted SVD..."
-    )
+    print("GUIDE Step A: Compressing Embeddings (768 -> 384) via Frequency-Weighted SVD...")
 
     # 1. Count token frequencies on a fast 50k-row sample of the corpus
     tokenizer = AutoTokenizer.from_pretrained(TEACHER_ID)
     sample_ds = load_dataset(
         "parquet",
-        data_files={"train": "data/combined_mlm_dataset.parquet"},
+        data_files={"train": DATASET_FILE_PATH},
         split="train[:50000]",
     )
 
@@ -225,9 +223,7 @@ def initialize_with_guide() -> ModernBertModel:
         batch_ids = tokenizer(
             sample_ds[i : i + 1000]["text"], truncation=True, max_length=1024
         )["input_ids"]
-        flat_ids = np.fromiter(
-            (tid for seq in batch_ids for tid in seq), dtype=np.int64
-        )
+        flat_ids = np.fromiter((tid for seq in batch_ids for tid in seq), dtype=np.int64)
         counts += np.bincount(flat_ids, minlength=teacher.config.vocab_size)
 
     # Smooth with sqrt(count + 1); zero out [PAD] so padding doesn't steer the basis
@@ -277,12 +273,12 @@ def initialize_with_guide() -> ModernBertModel:
 # ==========================================
 
 
-def main() -> None:
+def main(DATASET_FILE_PATH: str) -> None:
     if os.path.exists(OUTPUT_PATH):
         shutil.rmtree(OUTPUT_PATH)
 
     # Initialize
-    hf_model = initialize_with_guide()
+    hf_model = initialize_with_guide(DATASET_FILE_PATH=DATASET_FILE_PATH)
 
     # Save Model
     print(f"Saving initialized model to {OUTPUT_PATH}...")
@@ -333,4 +329,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(None)
