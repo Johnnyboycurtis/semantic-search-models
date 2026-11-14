@@ -208,7 +208,9 @@ def initialize_with_guide() -> ModernBertModel:
     student = ModernBertModel(student_config).to(dtype=torch.float32)
 
     # --- Step A: Compress Embeddings via Frequency-Weighted Exact SVD ---
-    print("GUIDE Step A: Compressing Embeddings (768 -> 384) via Frequency-Weighted SVD...")
+    print(
+        "GUIDE Step A: Compressing Embeddings (768 -> 384) via Frequency-Weighted SVD..."
+    )
 
     # 1. Count token frequencies on a fast 50k-row sample of the corpus
     tokenizer = AutoTokenizer.from_pretrained(TEACHER_ID)
@@ -223,7 +225,9 @@ def initialize_with_guide() -> ModernBertModel:
         batch_ids = tokenizer(
             sample_ds[i : i + 1000]["text"], truncation=True, max_length=1024
         )["input_ids"]
-        flat_ids = np.fromiter((tid for seq in batch_ids for tid in seq), dtype=np.int64)
+        flat_ids = np.fromiter(
+            (tid for seq in batch_ids for tid in seq), dtype=np.int64
+        )
         counts += np.bincount(flat_ids, minlength=teacher.config.vocab_size)
 
     # Smooth with sqrt(count + 1); zero out [PAD] so padding doesn't steer the basis
