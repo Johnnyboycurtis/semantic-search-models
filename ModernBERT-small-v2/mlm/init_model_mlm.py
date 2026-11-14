@@ -3,8 +3,8 @@ import shutil
 
 import numpy as np
 import torch
+from datasets import load_dataset
 from sentence_transformers import SentenceTransformer
-from sklearn.decomposition import PCA
 from transformers import (
     AutoModel,
     AutoTokenizer,
@@ -207,31 +207,47 @@ def initialize_with_guide() -> ModernBertModel:
     print("Initializing Blank Student...")
     student = ModernBertModel(student_config).to(dtype=torch.float32)
 
-    # --- Step A: Compress Embeddings via Uncentered Subspace Projection ---
-    print("GUIDE Step A: Compressing Embeddings (768 -> 384)...")
+    # --- Step A: Compress Embeddings via Frequency-Weighted Exact SVD ---
+    print("GUIDE Step A: Compressing Embeddings (768 -> 384) via Frequency-Weighted SVD...")
 
-    E_T = teacher.embeddings.tok_embeddings.weight.detach().numpy()
-
-    # Use svd_solver="full" for 100% deterministic decomposition (avoids randomized SVD).
-    pca = PCA(n_components=student_config.hidden_size, svd_solver="full")
-    pca.fit(E_T)
-    print(
-        f"PCA explained variance ratio sum: {pca.explained_variance_ratio_.sum():.4f}"
+    # 1. Count token frequencies on a fast 50k-row sample of the corpus
+    tokenizer = AutoTokenizer.from_pretrained(TEACHER_ID)
+    sample_ds = load_dataset(
+        "parquet",
+        data_files={"train": "data/combined_mlm_dataset.parquet"},
+        split="train[:50000]",
     )
 
-    # Projection Matrix M: [768, 384].
-    # Project via E_T @ M (uncentered) rather than pca.fit_transform(E_T) so embeddings
-    # and downstream linear weight projections (W @ M, M.T @ W) share the exact same subspace
-    # without introducing a -pca.mean_ @ M shift.
-    M = pca.components_.T
-    E_S_numpy = np.dot(E_T, M)
+    counts = np.zeros(teacher.config.vocab_size, dtype=np.float64)
+    for i in range(0, len(sample_ds), 1000):
+        batch_ids = tokenizer(
+            sample_ds[i : i + 1000]["text"], truncation=True, max_length=1024
+        )["input_ids"]
+        flat_ids = np.fromiter((tid for seq in batch_ids for tid in seq), dtype=np.int64)
+        counts += np.bincount(flat_ids, minlength=teacher.config.vocab_size)
 
-    _copy_weight(student.embeddings.tok_embeddings.weight, E_S_numpy)
+    # Smooth with sqrt(count + 1); zero out [PAD] so padding doesn't steer the basis
+    weights = np.sqrt(counts + 1.0)
+    weights[teacher.config.pad_token_id] = 0.0
+
+    # 2. Exact SVD on frequency-weighted embeddings (deterministic)
+    E_T = teacher.embeddings.tok_embeddings.weight.detach().cpu().numpy()
+    E_weighted = E_T * weights[:, None]
+
+    _, S, Vt = np.linalg.svd(E_weighted, full_matrices=False)
+    M = Vt[: student_config.hidden_size].T  # Orthonormal [768, 384] basis
+
+    retained = (S[: student_config.hidden_size] ** 2).sum() / (S**2).sum()
+    print(f"Frequency-Weighted SVD retained variance: {retained:.2%}")
+
+    # 3. Project the UNWEIGHTED embeddings into basis M so token norms stay intact
+    E_S = E_T @ M
+    _copy_weight(student.embeddings.tok_embeddings.weight, E_S)
 
     # Safeguard: ensure [PAD] token embedding remains strictly zero.
     with torch.no_grad():
         student.embeddings.tok_embeddings.weight[teacher.config.pad_token_id].zero_()
-    print("Embeddings initialized via uncentered PCA projection.")
+    print("Embeddings initialized via frequency-weighted SVD projection.")
 
     # --- Step B: Project All 12 Student Layers ---
     print(

@@ -14,7 +14,7 @@ def process_datasets():
 
     def flatten_triplets(batch):
         # Concatenates all three columns into one long list of strings
-        return {"text": batch["query"] + " : " + batch["positive"]}
+        return {"text": batch["query"] + batch["positive"] + batch["negative"]}
 
     print("Mapping MS MARCO (Tripling row count for MLM)...")
     ms_flat = ms_ds.map(
