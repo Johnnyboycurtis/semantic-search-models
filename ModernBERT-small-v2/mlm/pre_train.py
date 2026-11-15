@@ -77,6 +77,9 @@ def run_pretraining():
     tokenized_datasets = dataset["train"].map(
         tokenize_function, batched=True, remove_columns=["text"], num_proc=6
     )
+    splits = tokenized_datasets.train_test_split(test_size=2000, seed=42)
+    train_dataset = splits["train"]
+    eval_dataset = splits["test"]
 
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer, mlm=True, mlm_probability=0.30
@@ -84,21 +87,20 @@ def run_pretraining():
 
     # 4. TRAINING ARGUMENTS
     training_args = TrainingArguments(
-        output_dir=OUTPUT_DIR,
+        output_dir="/content/drive/MyDrive/models/mlm-model",
         num_train_epochs=2,
         fp16=False,
         bf16=True,
-        per_device_train_batch_size=8,
-        gradient_accumulation_steps=4,
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={
-            "use_reentrant": False
-        },  # Required with frozen inputs
+        per_device_train_batch_size=64,  # Plenty of headroom on 96GB G4
+        gradient_accumulation_steps=2,
+        gradient_checkpointing=False,     # ~25% faster when VRAM isn't tight
         learning_rate=5e-4,
         lr_scheduler_type="cosine",
         warmup_steps=1000,
         weight_decay=0.01,
         logging_steps=50,
+        eval_strategy="steps",
+        eval_steps=2500,
         save_steps=2500,
         save_total_limit=4,
         dataloader_num_workers=4,
@@ -107,7 +109,8 @@ def run_pretraining():
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=tokenized_datasets,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         data_collator=data_collator,
     )
 
