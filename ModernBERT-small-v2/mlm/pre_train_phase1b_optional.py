@@ -33,7 +33,6 @@ OUTPUT_DIR = "/content/drive/MyDrive/data/models/mlm-model-1b/"
 MAX_LENGTH = 4096
 
 
-
 # 1. FIND THE ACTUAL LAST CHECKPOINT (for resumption if interrupted)
 last_checkpoint = None
 if os.path.isdir(OUTPUT_DIR):
@@ -102,15 +101,17 @@ training_args = TrainingArguments(
     num_train_epochs=1,
     fp16=False,
     bf16=True,
-    per_device_train_batch_size=64,
-    gradient_accumulation_steps=2,
-    gradient_checkpointing=False,
+    per_device_train_batch_size=8,
+    gradient_accumulation_steps=4,
+    gradient_checkpointing=True,
+    gradient_checkpointing_kwargs={"use_reentrant": False},
     learning_rate=1e-5,
     lr_scheduler_type="cosine",
     warmup_steps=1500,
     weight_decay=0.01,
     eval_strategy="steps",
     eval_steps=2500,
+    per_device_eval_batch_size=8,
     save_steps=2500,
     save_total_limit=3,
     dataloader_num_workers=8,
@@ -133,4 +134,3 @@ trainer.train(resume_from_checkpoint=last_checkpoint)
 # 6. SAVE
 trainer.save_model(f"{OUTPUT_DIR}/final")
 tokenizer.save_pretrained(f"{OUTPUT_DIR}/final")
-
