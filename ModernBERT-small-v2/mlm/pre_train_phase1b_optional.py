@@ -8,6 +8,10 @@ When to run this script:
 """
 
 import os
+
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import torch
 from datasets import concatenate_datasets, load_dataset, load_from_disk
 from transformers import (
@@ -49,17 +53,18 @@ load_path = last_checkpoint if last_checkpoint else PHASE1A_MODEL_PATH
 
 config = AutoConfig.from_pretrained(load_path)
 config.max_position_embeddings = MAX_LENGTH
+config.global_rope_theta = 160000.0  # <-- Added: required for 4096 RoPE scaling
 config.tie_word_embeddings = False
 
 model = AutoModelForMaskedLM.from_pretrained(
     load_path,
     config=config,
-    dtype=torch.float32,
+    dtype=torch.bfloat16,
     attn_implementation="sdpa",
 )
 
-# Keep token embeddings frozen to preserve the Phase 1A/GUIDE subspace
-model.model.embeddings.tok_embeddings.weight.requires_grad = False
+# Keep token embeddings trainable so the 384-d space can adapt during context extension
+model.model.embeddings.tok_embeddings.weight.requires_grad = True
 
 trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
 frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
@@ -96,6 +101,36 @@ data_collator = DataCollatorForLanguageModeling(
 # 4. TRAINING ARGUMENTS
 # Tuned for 96GB G4 at 4096 tokens: batch 16 * grad_accum 2 = effective batch 32.
 # Run for a short 1-epoch / ~5-10% Phase 1A budget with a lower LR (1e-4).
+
+training_args = TrainingArguments(
+    output_dir=OUTPUT_DIR,
+    torch_compile=True,
+    num_train_epochs=1,
+    fp16=False,
+    bf16=True,
+    per_device_train_batch_size=8,
+    gradient_accumulation_steps=8,  # Effective batch size = 64
+    gradient_checkpointing=True,
+    gradient_checkpointing_kwargs={"use_reentrant": False},
+    learning_rate=8e-5,
+    lr_scheduler_type="cosine",
+    warmup_steps=0.05,  # Float in [0, 1) = 5% of total training steps
+    weight_decay=0.01,
+    adam_beta2=0.98,
+    max_grad_norm=1.0,
+    optim="adamw_torch_fused",
+    logging_steps=200,
+    eval_strategy="steps",
+    eval_steps=1000,
+    bf16_full_eval=True,
+    per_device_eval_batch_size=8,
+    save_steps=1000,
+    save_total_limit=3,
+    dataloader_num_workers=8,
+    report_to="none",
+)
+
+"""
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
     num_train_epochs=1,
@@ -103,8 +138,8 @@ training_args = TrainingArguments(
     bf16=True,
     per_device_train_batch_size=8,
     gradient_accumulation_steps=4,
-    gradient_checkpointing=True,
-    gradient_checkpointing_kwargs={"use_reentrant": False},
+    #gradient_checkpointing=True,
+    #gradient_checkpointing_kwargs={"use_reentrant": False},
     learning_rate=1e-5,
     lr_scheduler_type="cosine",
     warmup_steps=1500,
@@ -117,6 +152,16 @@ training_args = TrainingArguments(
     dataloader_num_workers=8,
     report_to="none",
 )
+"""
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,
+    data_collator=data_collator,
+)
+
 
 trainer = Trainer(
     model=model,
