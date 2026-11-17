@@ -9,7 +9,7 @@ When to run this script:
 
 import os
 import torch
-from datasets import load_from_disk
+from datasets import concatenate_datasets, load_dataset, load_from_disk
 from transformers import (
     AutoTokenizer,
     AutoModelForMaskedLM,
@@ -18,14 +18,16 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+from transformers import AutoConfig, AutoModelForMaskedLM
 from transformers.trainer_utils import get_last_checkpoint
 
 set_seed(42)
 
 # Load from Phase 1A's final checkpoint & pre-tokenized dataset from tokenize-finewiki-en.py
-PHASE1A_MODEL_PATH = "./modernbert-small-mlm/final"
+PHASE1A_MODEL_PATH = "/content/drive/MyDrive/data/models/mlm-model/final/"
 TOKENIZED_DATASET_DIR = "/content/drive/MyDrive/data/finewiki_4096_filtered"
-OUTPUT_DIR = "./modernbert-small-mlm-4096"
+OTHER_DATASET_FILE = "philosophy_gemma4_text_train.parquet"
+OUTPUT_DIR = "/content/drive/MyDrive/data/models/mlm-model-1b/"
 
 # Context extension settings
 MAX_LENGTH = 4096
@@ -45,13 +47,16 @@ if os.path.isdir(OUTPUT_DIR):
 # local_rope_theta stays at 10000.0 because local layers keep a 128-token sliding window.
 print("--- Loading Phase 1A Model for Context Extension (4096) ---")
 load_path = last_checkpoint if last_checkpoint else PHASE1A_MODEL_PATH
+
+config = AutoConfig.from_pretrained(load_path)
+config.max_position_embeddings = MAX_LENGTH
+config.tie_word_embeddings = False
+
 model = AutoModelForMaskedLM.from_pretrained(
     load_path,
-    dtype=torch.float32,  # Master weights in fp32; mixed-precision training in bf16
+    config=config,
+    dtype=torch.float32,
     attn_implementation="sdpa",
-    tie_word_embeddings=False,
-    max_position_embeddings=MAX_LENGTH,
-    global_rope_theta=160000.0,
 )
 
 # Keep token embeddings frozen to preserve the Phase 1A/GUIDE subspace
@@ -63,17 +68,31 @@ print(f"--- Parameters | Trainable: {trainable:,} | Frozen: {frozen:,} ---")
 
 tokenizer = AutoTokenizer.from_pretrained(PHASE1A_MODEL_PATH)
 
-# 3. DATASET (Load pre-tokenized & filtered Arrow dataset from tokenize-finewiki-en.py)
+
+# 3. DATASET (Load pre-tokenized FineWiki + tokenize & append other_dataset.parquet)
 print(f"--- Loading Pre-tokenized Dataset from {TOKENIZED_DATASET_DIR} ---")
-tokenized_datasets = load_from_disk(TOKENIZED_DATASET_DIR)
-print(f"--- Loaded {len(tokenized_datasets):,} long-document rows ---")
-splits = tokenized_datasets.train_test_split(test_size=1000, seed=42)
+finewiki_ds = load_from_disk(TOKENIZED_DATASET_DIR)
+print(f"--- Loaded {len(finewiki_ds):,} FineWiki long-document rows ---")
+
+print(f"--- Loading & Tokenizing {OTHER_DATASET_FILE} ---")
+other_raw = load_dataset("parquet", data_files={"train": OTHER_DATASET_FILE})["train"]
+other_ds = other_raw.map(
+    lambda ex: tokenizer(ex["text"], truncation=True, max_length=MAX_LENGTH),
+    batched=True,
+    remove_columns=other_raw.column_names,
+    num_proc=8,
+)
+print(f"--- Tokenized {len(other_ds):,} rows from {OTHER_DATASET_FILE} ---")
+
+tokenized_datasets = concatenate_datasets([finewiki_ds, other_ds])
+splits = tokenized_datasets.train_test_split(test_size=2000, seed=67)
 train_dataset = splits["train"]
 eval_dataset = splits["test"]
 
 data_collator = DataCollatorForLanguageModeling(
     tokenizer=tokenizer, mlm=True, mlm_probability=0.30
 )
+
 
 # 4. TRAINING ARGUMENTS
 # Tuned for 96GB G4 at 4096 tokens: batch 16 * grad_accum 2 = effective batch 32.
@@ -83,19 +102,18 @@ training_args = TrainingArguments(
     num_train_epochs=1,
     fp16=False,
     bf16=True,
-    per_device_train_batch_size=16,
+    per_device_train_batch_size=64,
     gradient_accumulation_steps=2,
     gradient_checkpointing=False,
-    learning_rate=1e-4,
+    learning_rate=1e-5,
     lr_scheduler_type="cosine",
-    warmup_steps=100,
+    warmup_steps=1500,
     weight_decay=0.01,
-    logging_steps=25,
     eval_strategy="steps",
     eval_steps=2500,
     save_steps=2500,
     save_total_limit=3,
-    dataloader_num_workers=4,
+    dataloader_num_workers=8,
     report_to="none",
 )
 
@@ -107,6 +125,7 @@ trainer = Trainer(
     data_collator=data_collator,
 )
 
+
 # 5. EXECUTION
 print("--- Starting / Resuming Optional Phase 1B Context Extension ---")
 trainer.train(resume_from_checkpoint=last_checkpoint)
@@ -114,5 +133,4 @@ trainer.train(resume_from_checkpoint=last_checkpoint)
 # 6. SAVE
 trainer.save_model(f"{OUTPUT_DIR}/final")
 tokenizer.save_pretrained(f"{OUTPUT_DIR}/final")
-
 
