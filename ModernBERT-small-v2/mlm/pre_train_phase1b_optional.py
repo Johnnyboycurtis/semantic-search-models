@@ -9,7 +9,7 @@ When to run this script:
 
 import os
 import torch
-from datasets import load_dataset
+from datasets import load_from_disk
 from transformers import (
     AutoTokenizer,
     AutoModelForMaskedLM,
@@ -22,14 +22,13 @@ from transformers.trainer_utils import get_last_checkpoint
 
 set_seed(42)
 
-# Load from Phase 1A's final checkpoint
+# Load from Phase 1A's final checkpoint & pre-tokenized dataset from tokenize-finewiki-en.py
 PHASE1A_MODEL_PATH = "./modernbert-small-mlm/final"
-TRAIN_FILE = "data/finewiki_en.parquet"
+TOKENIZED_DATASET_DIR = "/content/drive/MyDrive/data/finewiki_4096_filtered"
 OUTPUT_DIR = "./modernbert-small-mlm-4096"
 
 # Context extension settings
 MAX_LENGTH = 4096
-MIN_DOC_TOKENS = 1500  # Filter out short snippets to avoid padding waste up to 4096
 
 
 
@@ -64,32 +63,10 @@ print(f"--- Parameters | Trainable: {trainable:,} | Frozen: {frozen:,} ---")
 
 tokenizer = AutoTokenizer.from_pretrained(PHASE1A_MODEL_PATH)
 
-# 3. DATASET (Filter strictly to long documents)
-print("--- Preparing & Filtering Long-Document Dataset ---")
-dataset = load_dataset("parquet", data_files={"train": TRAIN_FILE})
-
-def tokenize_function(examples):
-    return tokenizer(
-        examples["text"],
-        truncation=True,
-        max_length=MAX_LENGTH,
-        return_special_tokens_mask=True,
-        return_token_type_ids=False,
-    )
-
-tokenized_datasets = dataset["train"].map(
-    tokenize_function, batched=True, remove_columns=["text"], num_proc=4
-)
-
-# Keep only documents that actually need long-context attention (>= 1,500 tokens)
-before_count = len(tokenized_datasets)
-tokenized_datasets = tokenized_datasets.filter(
-    lambda x: len(x["input_ids"]) >= MIN_DOC_TOKENS, num_proc=4
-)
-print(
-    f"--- Filtered to Long Docs (>= {MIN_DOC_TOKENS} tokens): "
-    f"{len(tokenized_datasets):,} / {before_count:,} ---"
-)
+# 3. DATASET (Load pre-tokenized & filtered Arrow dataset from tokenize-finewiki-en.py)
+print(f"--- Loading Pre-tokenized Dataset from {TOKENIZED_DATASET_DIR} ---")
+tokenized_datasets = load_from_disk(TOKENIZED_DATASET_DIR)
+print(f"--- Loaded {len(tokenized_datasets):,} long-document rows ---")
 splits = tokenized_datasets.train_test_split(test_size=1000, seed=42)
 train_dataset = splits["train"]
 eval_dataset = splits["test"]
