@@ -20,13 +20,9 @@ from transformers import (
 TEACHER_ID = "Alibaba-NLP/gte-modernbert-base"
 OUTPUT_PATH = "./models/base-model"
 
-# Map each of the 12 student layers to a corresponding layer in the 22-layer teacher.
-# Both ModernBERT-base and our student use global_attn_every_n_layers=3, so teacher
-# layers 0, 6, 12 use global attention while intermediate layers use local sliding-window
-# attention. This mapping aligns global/local roles across depths:
-#   Student global layers (0, 3, 6, 9) <- Teacher layers (0, 6, 12, 19)
-#   Student local layers               <- Teacher local layers
-LAYER_MAP = [0, 1, 2, 6, 7, 8, 12, 13, 14, 19, 20, 21]
+# Per the GUIDE paper (Tables 7 & 8), initialize only Layer 0 from the teacher
+# and leave Layers 1-11 randomly initialized so deeper layers can freely adapt
+# to the 384-dim width.
 
 
 def build_student_config(vocab_size: int, pad_token_id: int) -> ModernBertConfig:
@@ -249,21 +245,17 @@ def initialize_with_guide(DATASET_FILE_PATH: str) -> ModernBertModel:
         student.embeddings.tok_embeddings.weight[teacher.config.pad_token_id].zero_()
     print("Embeddings initialized via frequency-weighted SVD projection.")
 
-    # --- Step B: Project All 12 Student Layers ---
-    print(
-        f"GUIDE Step B: Projecting all {student_config.num_hidden_layers} layers "
-        f"using teacher mapping {LAYER_MAP}..."
+    # --- Step B: Project Layer 0 Only (Layers 1-11 stay randomly initialized) ---
+    print("GUIDE Step B: Projecting Layer 0 only (leaving Layers 1-11 random)...")
+    project_layer(
+        teacher.layers[0],
+        student.layers[0],
+        M,
+        t_num_heads=teacher.config.num_attention_heads,
+        s_num_heads=student_config.num_attention_heads,
     )
-    for s_idx, t_idx in enumerate(LAYER_MAP):
-        project_layer(
-            teacher.layers[t_idx],
-            student.layers[s_idx],
-            M,
-            t_num_heads=teacher.config.num_attention_heads,
-            s_num_heads=student_config.num_attention_heads,
-        )
 
-    print("All 12 layers initialized via Projection + Norm-Ranked Slicing.")
+    print("Layer 0 initialized via Projection + Norm-Ranked Slicing; Layers 1-11 random.")
 
     return student
 
